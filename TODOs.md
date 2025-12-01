@@ -1,0 +1,257 @@
+# SAM3 to TVM Port - TODOs
+
+This document tracks the progress of porting SAM3 to TVM.
+
+## Current Status
+
+### ✅ Phase 1: Vision Backbone Export (COMPLETE)
+- [x] Diagnosed RoPE shape mismatch (1024 vs 1008 input size)
+- [x] Identified correct preprocessing (1008×1008, normalize with mean/std=0.5)
+- [x] Exported vision backbone using `torch.export`
+- [x] Saved to `sam3_vision_backbone_exported.pt2` (1.8GB)
+- [x] Identified blocker: TVM doesn't support `torch.complex64` (used in RoPE)
+
+**Key Insight**: TVM has RoPE implementations for LLMs (e.g., `tvm.relax.frontend.nn.llm.kv_cache`), which may help solve the complex64 issue.
+
+---
+
+## SAM3 Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Input: Image (1008×1008) + Prompts (text/box/point)   │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│ 1. BACKBONE                                      [DONE] │
+│    ├─ Vision Encoder (ViT + RoPE)                      │
+│    ├─ Text Encoder (CLIP-like)                         │
+│    └─ VL Combiner (fusion)                             │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│ 2. GEOMETRY ENCODER                              [TODO] │
+│    ├─ Point encoding                                    │
+│    ├─ Box encoding (roi_align)                         │
+│    └─ Mask encoding (grid_sample)                      │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│ 3. TRANSFORMER ENCODER                           [TODO] │
+│    ├─ Cross-attention (vision + prompts)               │
+│    └─ Multi-scale fusion                               │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│ 4. TRANSFORMER DECODER                           [TODO] │
+│    ├─ Object queries                                    │
+│    ├─ Self-attention                                    │
+│    ├─ Cross-attention                                   │
+│    ├─ RoPE attention (complex64 issue!)                │
+│    └─ Box refinement                                    │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│ 5. OUTPUT HEADS                                  [TODO] │
+│    ├─ Segmentation Head (pixel-wise masks)             │
+│    └─ Scoring Head (confidence scores)                 │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Phase 2: Export Remaining Components
+
+### Priority 1: Core Components
+
+#### [~] Export Geometry Encoder (**Analyzed - Skip standalone export**)
+- **File**: `sam3/model/geometry_encoders.py::SequenceGeometryEncoder`
+- **Analysis**: `NOTES/GEOMETRY_ENCODER_ANALYSIS.md`
+- **Key Ops identified**: 
+  - `grid_sample` ❓ (TVM support unknown)
+  - `roi_align` ❓ (TVM support unknown)
+  - Linear, Conv2d, LayerNorm ✅ (supported)
+- **Expected complexity**: High (due to dependencies)
+- **Decision**: **Export as part of full model**, not standalone
+- **Reason**: 
+  - Depends on vision backbone outputs
+  - Complex Prompt data structure
+  - Multiple conditional pathways
+  - Sequence-first format
+- **Next steps**:
+  1. Verify grid_sample TVM support
+  2. Verify roi_align TVM support
+  3. Export as part of end-to-end model
+
+#### [ ] Export Transformer Encoder
+- **File**: `sam3/model/encoder.py::TransformerEncoderFusion`
+- **Script**: `scripts/export_transformer_encoder.py`
+- **Ops to verify**: 
+  - Multi-head attention
+  - Layer norm
+  - Cross-attention
+- **Expected complexity**: Medium
+- **Notes**: No RoPE, tests cross-attention support
+
+#### [ ] Export Transformer Decoder
+- **File**: `sam3/model/decoder.py::TransformerDecoder`
+- **Script**: `scripts/export_decoder.py`
+- **Ops to verify**: 
+  - RoPE attention
+  - Deformable attention (if used)
+  - Box refinement
+- **Expected complexity**: High
+- **Notes**: Will hit RoPE complex64 issue again
+
+### Priority 2: Output Heads
+
+#### [ ] Export Segmentation Head
+- **File**: `sam3/model/head.py::UniversalSegmentationHead`
+- **Script**: `scripts/export_segmentation_head.py`
+- **Ops to verify**: 
+  - Upsampling
+  - Convolutions
+  - Multi-scale aggregation
+- **Expected complexity**: Medium
+
+#### [ ] Export Scoring Head
+- **File**: `sam3/model/model_misc.py::DotProductScoring`
+- **Script**: `scripts/export_scoring_head.py`
+- **Ops to verify**: 
+  - Dot product
+  - Linear layers
+- **Expected complexity**: Low
+
+### Priority 3: Integration
+
+#### [ ] Export End-to-End Model
+- **Script**: `scripts/export_full_model.py`
+- **Notes**: 
+  - May need custom wrapper to handle data structures
+  - Complex due to multiple inputs/outputs
+- **Expected complexity**: High
+
+---
+
+## Phase 3: TVM Import & Op Support
+
+### RoPE Implementation Strategy
+
+#### Step 1: Research TVM's LLM RoPE
+- [ ] Study `tvm.relax.frontend.nn.llm.kv_cache`
+- [ ] Check if complex64 is implicitly handled or decomposed
+- [ ] Identify reusable patterns
+- [ ] Document findings in `NOTES/TVM_ROPE_RESEARCH.md`
+
+#### Step 2: Choose Implementation Approach
+**Options:**
+- **Option A**: Decompose complex ops in SAM3 source (fork/patch)
+- **Option B**: Add complex64 support to TVM PyTorch frontend
+- **Option C**: Use TVM's existing RoPE ops for LLMs
+- **Option D**: Write custom TVM operator for 2D RoPE
+
+**Decision**: TBD after research
+
+#### Step 3: Other Op Support
+- [ ] Verify `roi_align` support in TVM
+- [ ] Verify `grid_sample` support in TVM
+- [ ] Check if deformable attention is used
+- [ ] Document op support status
+
+### TVM Import Tasks
+
+#### [ ] Import Vision Backbone to TVM Relax
+- **Blocker**: RoPE complex64 issue
+- **Target**: Successful Relax IR generation
+- **Verification**: Compare outputs with PyTorch
+
+#### [ ] Import Geometry Encoder to TVM Relax
+- **Dependencies**: roi_align and grid_sample support
+- **Verification**: Compare outputs with PyTorch
+
+#### [ ] Import Transformer Encoder to TVM Relax
+- **Dependencies**: Cross-attention support
+- **Verification**: Compare outputs with PyTorch
+
+#### [ ] Import Transformer Decoder to TVM Relax
+- **Dependencies**: RoPE solution from vision backbone
+- **Verification**: Compare outputs with PyTorch
+
+#### [ ] Import Output Heads to TVM Relax
+- **Expected**: Should be straightforward
+- **Verification**: Compare outputs with PyTorch
+
+#### [ ] End-to-End TVM Module
+- **Tasks**:
+  - Combine all components
+  - Handle multi-input/multi-output
+  - Verify correctness vs PyTorch
+  - Document any limitations
+
+---
+
+## Phase 4: Optimization & Verification
+
+### Correctness Verification
+- [ ] Component-level output comparison (PyTorch vs TVM)
+  - [ ] Vision backbone
+  - [ ] Geometry encoder
+  - [ ] Transformer encoder
+  - [ ] Transformer decoder
+  - [ ] Segmentation head
+  - [ ] Scoring head
+- [ ] End-to-end output comparison
+- [ ] Numerical tolerance testing
+- [ ] Document comparison methodology
+
+### Performance Optimization
+- [ ] Apply TVM tuning (MetaSchedule)
+  - [ ] Vision backbone
+  - [ ] Full model
+- [ ] Memory optimization
+  - [ ] Analyze peak memory usage
+  - [ ] Optimize memory layout
+- [ ] Batch size optimization
+- [ ] Compare with PyTorch performance
+  - [ ] Latency
+  - [ ] Throughput
+  - [ ] Memory usage
+
+### Deployment
+- [ ] Target-specific compilation
+  - [ ] CPU (x86_64)
+  - [ ] GPU (CUDA)
+  - [ ] Metal (Apple Silicon)
+- [ ] Runtime optimization
+- [ ] Benchmarking on target hardware
+- [ ] Document deployment guide
+
+---
+
+## Immediate Next Steps
+
+1. **Export Geometry Encoder** (`scripts/export_geometry_encoder.py`)
+   - Simplest component to start with
+   - Will reveal grid_sample/roi_align support status
+   
+2. **Export Transformer Encoder** (`scripts/export_transformer_encoder.py`)
+   - More complex, but no RoPE
+   - Tests cross-attention support
+   
+3. **Export Decoder + Heads** 
+   - Will hit RoPE issue again
+   - Use same wrapper pattern as vision backbone
+   
+4. **Research RoPE in TVM**
+   - Study LLM implementations
+   - Prototype solution
+   - Apply to all RoPE components
+
+---
+
+## References
+
+- [NOTES/SAM3_ANALYSIS.md](NOTES/SAM3_ANALYSIS.md) - Architecture analysis
+- [NOTES/VISION_BACKBONE_TRACING_SUMMARY.md](NOTES/VISION_BACKBONE_TRACING_SUMMARY.md) - Vision backbone work
+- [NOTES/TVM_IMPORT_BLOCKER.md](NOTES/TVM_IMPORT_BLOCKER.md) - Complex64 blocker details
+- [scripts/README.md](scripts/README.md) - Scripts documentation
