@@ -8,7 +8,22 @@ SAM3 consists of three main components:
 
 ## Key Challenges & Dependencies
 
-### 1. NVIDIA-Specific Dependencies
+### 1. Correct Model Input Requirements
+**CRITICAL FINDINGS from official examples:**
+- **Input size**: 1008×1008 (NOT 1024×1024!)
+- **Preprocessing required**:
+  - Resize to 1008×1008 (square)
+  - Normalize with mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]
+- **Data structure**: Model expects `BatchedDatapoint` structure, not raw tensors
+- **Vision backbone alone** may not be directly traceable - needs preprocessing
+
+**Why we got RoPE errors:**
+- ViT expects (1008/16)×(1008/16) = 63×63 feature maps
+- RoPE freqs_cis is precomputed for 63×63
+- We fed 1024×1024, resulting in 64×64 feature maps
+- Shape mismatch: freqs_cis(63,63) != features(64,64) → AssertionError
+
+### 2. NVIDIA-Specific Dependencies
 -   **Triton**: Used for optimized kernels. Not available on macOS/CPU.
 -   **Flash Attention**: Used in `RoPEAttention`. Not available on macOS/CPU.
 -   **Mitigation**:
