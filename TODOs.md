@@ -64,24 +64,22 @@ This document tracks the progress of porting SAM3 to TVM.
 
 ### Priority 1: Core Components
 
-#### [~] Export Geometry Encoder (**Analyzed - Skip standalone export**)
+#### [x] Export Geometry Encoder (**Exported - TVM import blocked**)
 - **File**: `sam3/model/geometry_encoders.py::SequenceGeometryEncoder`
+- **Script**: `scripts/export_geometry_encoder.py`
+- **Export**: ✅ SUCCESS - saved to `sam3_geometry_encoder_exported.pt2`
+- **TVM Import**: ❌ BLOCKED
+- **TVM Blockers Identified**:
+  - `roi_align.default` ❌ Not supported
+  - `scatter.src` ❌ Not supported
+- **Patches Applied**:
+  - `geometry_encoders.py:659` - Removed `pin_memory()` for CPU compatibility
 - **Analysis**: `NOTES/GEOMETRY_ENCODER_ANALYSIS.md`
-- **Key Ops identified**: 
-  - `grid_sample` ❓ (TVM support unknown)
-  - `roi_align` ❓ (TVM support unknown)
-  - Linear, Conv2d, LayerNorm ✅ (supported)
-- **Expected complexity**: High (due to dependencies)
-- **Decision**: **Export as part of full model**, not standalone
-- **Reason**: 
-  - Depends on vision backbone outputs
-  - Complex Prompt data structure
-  - Multiple conditional pathways
-  - Sequence-first format
 - **Next steps**:
-  1. Verify grid_sample TVM support
-  2. Verify roi_align TVM support
-  3. Export as part of end-to-end model
+  1. Check if TVM has `roi_align` in vision ops
+  2. Check if `scatter` can be replaced or implemented
+  3. Consider implementing custom TVM operators
+  4. OR wait for TVM support
 
 #### [ ] Export Transformer Encoder
 - **File**: `sam3/model/encoder.py::TransformerEncoderFusion`
