@@ -90,6 +90,7 @@ This document tracks the progress of porting SAM3 to TVM.
   - Cross-attention
 - **Expected complexity**: Medium
 - **Notes**: No RoPE, tests cross-attention support
+ - **Status**: Script scaffold added with dummy inputs; need to run export + TVM import to confirm op coverage
 
 #### [ ] Export Transformer Decoder
 - **File**: `sam3/model/decoder.py::TransformerDecoder`

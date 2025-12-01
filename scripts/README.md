@@ -30,10 +30,23 @@ from sam3.model_builder import build_sam3_image_model
 
 **Status:** ⚠️ Export works, TVM import blocked by torch.complex64 support (RoPE)
 
+### `export_transformer_encoder.py`
+Exports `TransformerEncoderFusion` to validate cross-attention + MHA support and tries TVM import.
+
+**What it does:**
+- Builds SAM3 and grabs the transformer encoder only
+- Uses dummy tensors shaped like real inputs (vision features + text prompts)
+- Flattens dict outputs to a tuple for `torch.export`
+- Saves `sam3_transformer_encoder_exported.pt2` and optional TVM IR dump
+
+**Status:** Draft/test harness for TVM op coverage
+
 ## Usage
 
 ```bash
 py -3.13 scripts/export_vision_backbone.py
+# or
+py -3.13 scripts/export_transformer_encoder.py
 ```
 
 ## Next Steps
