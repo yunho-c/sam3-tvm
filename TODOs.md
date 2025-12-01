@@ -81,7 +81,7 @@ This document tracks the progress of porting SAM3 to TVM.
   3. Consider implementing custom TVM operators
   4. OR wait for TVM support
 
-#### [ ] Export Transformer Encoder
+#### [x] Export Transformer Encoder
 - **File**: `sam3/model/encoder.py::TransformerEncoderFusion`
 - **Script**: `scripts/export_transformer_encoder.py`
 - **Ops to verify**: 
@@ -90,7 +90,7 @@ This document tracks the progress of porting SAM3 to TVM.
   - Cross-attention
 - **Expected complexity**: Medium
 - **Notes**: No RoPE, tests cross-attention support
- - **Status**: Script scaffold added with dummy inputs; need to run export + TVM import to confirm op coverage
+ - **Status**: Export + TVM import succeed using runtime shim (`scripts/tvm_custom_ops.py`) to patch `aten::prod.dim_int` into TVM’s convert map (hacky; replace with upstream converter)
 
 #### [ ] Export Transformer Decoder
 - **File**: `sam3/model/decoder.py::TransformerDecoder`
@@ -233,9 +233,9 @@ This document tracks the progress of porting SAM3 to TVM.
    - Simplest component to start with
    - Will reveal grid_sample/roi_align support status
    
-2. **Export Transformer Encoder** (`scripts/export_transformer_encoder.py`)
-   - More complex, but no RoPE
-   - Tests cross-attention support
+2. **Upstream/replace prod shim**
+   - Add proper `aten::prod.dim_int` converter to TVM or refactor shim away
+   - Keep shim as temporary unblocker for transformer encoder import
    
 3. **Export Decoder + Heads** 
    - Will hit RoPE issue again

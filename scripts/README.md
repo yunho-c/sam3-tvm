@@ -38,6 +38,7 @@ Exports `TransformerEncoderFusion` to validate cross-attention + MHA support and
 - Uses dummy tensors shaped like real inputs (vision features + text prompts)
 - Flattens dict outputs to a tuple for `torch.export`
 - Saves `sam3_transformer_encoder_exported.pt2` and optional TVM IR dump
+- Loads `tvm_custom_ops.py` shim to inject missing `aten::prod.dim_int` converter (temporary hack)
 
 **Status:** Draft/test harness for TVM op coverage
 

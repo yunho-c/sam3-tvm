@@ -13,6 +13,7 @@ the full SAM3 model. Inputs are plain tensors shaped like the real model:
 
 import torch
 import mock_setup  # noqa: F401 - ensures external deps are mocked before import
+import tvm_custom_ops  # noqa: F401 - runtime shim adding missing PyTorch op converters
 from sam3.model_builder import build_sam3_image_model
 
 
