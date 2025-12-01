@@ -1,0 +1,2 @@
+- https://docs.pytorch.org/TensorRT/tutorials/_rendered_examples/dynamo/torch_export_sam2.html
+- https://engineering.fb.com/2025/07/28/android/executorch-on-device-ml-meta-family-of-apps/
