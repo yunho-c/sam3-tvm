@@ -1,0 +1,3 @@
+[submodule "external/sam3"]
+	path = external/sam3
+	url = https://github.com/yunho-c/sam3
