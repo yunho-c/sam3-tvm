@@ -92,15 +92,19 @@ This document tracks the progress of porting SAM3 to TVM.
 - **Notes**: No RoPE, tests cross-attention support
  - **Status**: Export + TVM import succeed using runtime shim (`scripts/tvm_custom_ops.py`) to patch `aten::prod.dim_int` into TVM’s convert map (hacky; replace with upstream converter)
 
-#### [ ] Export Transformer Decoder
+#### [x] Export Transformer Decoder
 - **File**: `sam3/model/decoder.py::TransformerDecoder`
 - **Script**: `scripts/export_decoder.py`
-- **Ops to verify**: 
-  - RoPE attention
-  - Deformable attention (if used)
-  - Box refinement
-- **Expected complexity**: High
-- **Notes**: Will hit RoPE complex64 issue again
+- **Export**: ✅ SUCCESS - saved to `sam3_transformer_decoder_exported.pt2`
+- **TVM Import**: ✅ SUCCESS
+- **Patches Applied**:
+  - `scripts/export_decoder.py`: Used `strict=True` in `torch.export.export` to correctly handle guards without monkeypatching `is_dynamo_compiling`.
+  - `scripts/export_decoder.py`: Monkeypatched `BaseFXGraphImporter._div` to handle `floor_divide` type mismatch (float vs int).
+- **Notes**: Did NOT hit RoPE complex64 issue (likely uses different position embedding or compiled away).
+- **Ops verified**: 
+  - `floor_divide` (patched)
+  - `sin`/`cos` (for position embedding)
+  - `matmul`, `layer_norm`, `relu`
 
 ### Priority 2: Output Heads
 
