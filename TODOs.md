@@ -103,6 +103,7 @@ This document tracks the progress of porting SAM3 to TVM.
 - **Patches Applied**:
   - `scripts/export_decoder.py`: Used `strict=True` in `torch.export.export` to correctly handle guards without monkeypatching `is_dynamo_compiling`.
   - `scripts/export_decoder.py`: Monkeypatched `BaseFXGraphImporter._div` to handle `floor_divide` type mismatch (float vs int).
+  - `scripts/tvm_custom_ops.py`: Implemented custom converter for `aten::scatter.src` mapping to `relax.op.scatter_elements`.
 - **Notes**: Did NOT hit RoPE complex64 issue (likely uses different position embedding or compiled away).
 - **Ops verified**: 
   - `floor_divide` (patched)
