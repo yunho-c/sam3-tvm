@@ -32,8 +32,10 @@ sys.modules["triton.runtime.driver"] = triton.runtime.driver
 sys.modules["decord"] = MagicMock()
 
 # Import SAM3 components
+# Import SAM3 components
 from sam3.model.geometry_encoders import SequenceGeometryEncoder, Prompt
 from sam3.model.model_misc import MultiheadAttentionWrapper as MultiheadAttention
+from sam3.model.encoder import TransformerEncoderLayer
 
 def build_geometry_encoder():
     """
@@ -76,22 +78,42 @@ def build_geometry_encoder():
 
     pos_enc = PositionEmbeddingSine(num_pos_feats=128, normalize=True)
 
+    # Create geometry encoder layer
+    geo_layer = TransformerEncoderLayer(
+        activation="relu",
+        d_model=256,
+        dim_feedforward=2048,
+        dropout=0.1,
+        pos_enc_at_attn=False,
+        pre_norm=True,
+        self_attention=MultiheadAttention(
+            num_heads=8,
+            dropout=0.1,
+            embed_dim=256,
+            batch_first=False,
+        ),
+        pos_enc_at_cross_attn_queries=False,
+        pos_enc_at_cross_attn_keys=True,
+        cross_attention=MultiheadAttention(
+            num_heads=8,
+            dropout=0.1,
+            embed_dim=256,
+            batch_first=False,
+        ),
+    )
+
     encoder = SequenceGeometryEncoder(
         encode_boxes_as_points=True,
         points_direct_project=True,
         points_pool=True,
         points_pos_enc=True,
         boxes_direct_project=False,
-        boxes_pool=False,
+        boxes_pool=True,
         boxes_pos_enc=False,
         d_model=256,
         pos_enc=pos_enc,
         num_layers=2,
-        layer=MultiheadAttention(
-            num_heads=8,
-            dropout=0,
-            embed_dim=256,
-        ),
+        layer=geo_layer,
         roi_size=7,
         add_cls=True,
         add_post_encode_proj=True,

@@ -70,16 +70,11 @@ This document tracks the progress of porting SAM3 to TVM.
 - **Export**: ✅ SUCCESS - saved to `sam3_geometry_encoder_exported.pt2`
 - **TVM Import**: ❌ BLOCKED
 - **TVM Blockers Identified**:
-  - `roi_align.default` ❌ Not supported
-  - `scatter.src` ❌ Not supported
-- **Patches Applied**:
-  - `geometry_encoders.py:659` - Removed `pin_memory()` for CPU compatibility
-- **Analysis**: `NOTES/GEOMETRY_ENCODER_ANALYSIS.md`
-- **Next steps**:
-  1. Check if TVM has `roi_align` in vision ops
-  2. Check if `scatter` can be replaced or implemented
-  3. Consider implementing custom TVM operators
-  4. OR wait for TVM support
+  - `scatter.src` ❌ Not supported (used in `concat_padded_sequences`)
+  - `roi_align` ❓ Likely unsupported (masked by scatter failure)
+- **Notes**: 
+  - `SequenceGeometryEncoder` uses `TransformerEncoderLayer` which required careful reconstruction.
+  - `concat_padded_sequences` uses `scatter` for variable length sequence handling.
 
 #### [x] Export Transformer Encoder
 - **File**: `sam3/model/encoder.py::TransformerEncoderFusion`
