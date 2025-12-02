@@ -108,22 +108,26 @@ This document tracks the progress of porting SAM3 to TVM.
 
 ### Priority 2: Output Heads
 
-#### [ ] Export Segmentation Head
-- **File**: `sam3/model/head.py::UniversalSegmentationHead`
+#### [x] Export Segmentation Head
+- **File**: `sam3/model/maskformer_segmentation.py::UniversalSegmentationHead`
 - **Script**: `scripts/export_segmentation_head.py`
+- **Export**: ✅ SUCCESS - saved to `sam3_segmentation_head_exported.pt2`
+- **TVM Import**: ✅ SUCCESS
 - **Ops to verify**: 
   - Upsampling
   - Convolutions
   - Multi-scale aggregation
-- **Expected complexity**: Medium
+- **Notes**: Mocked `triton` and `decord` to bypass import errors. Adjusted dummy input shapes for `einsum`.
 
-#### [ ] Export Scoring Head
+#### [x] Export Scoring Head
 - **File**: `sam3/model/model_misc.py::DotProductScoring`
 - **Script**: `scripts/export_scoring_head.py`
+- **Export**: ✅ SUCCESS - saved to `sam3_scoring_head_exported.pt2`
+- **TVM Import**: ✅ SUCCESS
 - **Ops to verify**: 
   - Dot product
   - Linear layers
-- **Expected complexity**: Low
+- **Notes**: Mocked `triton` and `decord`.
 
 ### Priority 3: Integration
 

@@ -1,269 +1,218 @@
-"""
-Export SAM3 Geometry Encoder using torch.export.
-
-The Geometry Encoder encodes geometric prompts (points, boxes, masks) into embeddings.
-For standalone export, we use pre-computed vision features and create a simplified interface.
-"""
 
 import torch
 import torch.nn as nn
-import mock_setup
-from sam3.model_builder import build_sam3_image_model
-from sam3.model.geometry_encoders import Prompt
+import tvm
+from tvm import relax
+from tvm.relax.frontend.torch import from_exported_program
+
+import sys
+import types
+from unittest.mock import MagicMock
+
+# Mock triton and decord
+triton = types.ModuleType("triton")
+triton.language = MagicMock()
+triton.compiler = MagicMock()
+triton.jit = MagicMock()
+triton.runtime = types.ModuleType("triton.runtime")
+triton.runtime.autotuner = MagicMock()
+triton.runtime.jit = MagicMock()
+triton.runtime.driver = MagicMock()
+triton.Config = MagicMock()
+triton.__version__ = "2.0.0"
+
+sys.modules["triton"] = triton
+sys.modules["triton.language"] = triton.language
+sys.modules["triton.compiler"] = triton.compiler
+sys.modules["triton.runtime"] = triton.runtime
+sys.modules["triton.runtime.autotuner"] = triton.runtime.autotuner
+sys.modules["triton.runtime.jit"] = triton.runtime.jit
+sys.modules["triton.runtime.driver"] = triton.runtime.driver
+
+sys.modules["decord"] = MagicMock()
+
+# Import SAM3 components
+from sam3.model.geometry_encoders import SequenceGeometryEncoder, Prompt
+from sam3.model.model_misc import MultiheadAttentionWrapper as MultiheadAttention
+
+def build_geometry_encoder():
+    """
+    Reconstructs the Geometry Encoder as defined in sam3/model_builder.py
+    """
+    # Default config from model_builder.py (inferred)
+    # _create_image_encoder -> _create_geometry_encoder
+    
+    # We need a position encoding module
+    class PositionEmbeddingSine(nn.Module):
+        def __init__(self, num_pos_feats=64, temperature=10000, normalize=False, scale=None):
+            super().__init__()
+            self.num_pos_feats = num_pos_feats
+            self.temperature = temperature
+            self.normalize = normalize
+            if scale is not None and normalize is False:
+                raise ValueError("normalize should be True if scale is passed")
+            if scale is None:
+                scale = 2 * 3.141592653589793
+            self.scale = scale
+
+        def _encode_xy(self, x, y):
+            # x, y are flattened
+            assert x.dim() == 1
+            y_embed = y * self.scale
+            x_embed = x * self.scale
+            dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
+            dim_t = self.temperature ** (2 * (torch.div(dim_t, 2, rounding_mode="floor")) / self.num_pos_feats)
+
+            pos_x = x_embed[:, None] / dim_t
+            pos_y = y_embed[:, None] / dim_t
+            pos_x = torch.stack((pos_x[:, 0::2].sin(), pos_x[:, 1::2].cos()), dim=2).flatten(1)
+            pos_y = torch.stack((pos_y[:, 0::2].sin(), pos_y[:, 1::2].cos()), dim=2).flatten(1)
+            return pos_x, pos_y
+
+        def encode_boxes(self, cx, cy, w, h):
+            pos_x, pos_y = self._encode_xy(cx, cy)
+            pos_w, pos_h = self._encode_xy(w, h)
+            return torch.cat([pos_y, pos_x, pos_h, pos_w], dim=1)
+
+    pos_enc = PositionEmbeddingSine(num_pos_feats=128, normalize=True)
+
+    encoder = SequenceGeometryEncoder(
+        encode_boxes_as_points=True,
+        points_direct_project=True,
+        points_pool=True,
+        points_pos_enc=True,
+        boxes_direct_project=False,
+        boxes_pool=False,
+        boxes_pos_enc=False,
+        d_model=256,
+        pos_enc=pos_enc,
+        num_layers=2,
+        layer=MultiheadAttention(
+            num_heads=8,
+            dropout=0,
+            embed_dim=256,
+        ),
+        roi_size=7,
+        add_cls=True,
+        add_post_encode_proj=True,
+        mask_encoder=None, # Simplifying for now
+        add_mask_label=False,
+    )
+    return encoder
 
 class GeometryEncoderWrapper(nn.Module):
-    """
-    Wrapper for standalone geometry encoder export.
-    
-    Uses pre-computed vision features (from one forward pass of vision backbone)
-    and provides a simplified tensor-based interface instead of Prompt objects.
-    """
-    def __init__(self, geometry_encoder, vision_features, img_sizes, vision_pos_enc):
+    def __init__(self, encoder):
         super().__init__()
-        self.geometry_encoder = geometry_encoder
+        self.encoder = encoder
+
+    def forward(self, 
+                point_embeddings, point_mask, point_labels,
+                box_embeddings, box_mask, box_labels,
+                img_feats_last, img_size_h, img_size_w):
         
-        # Store vision features as buffers (part of module state)
-        for i, feat in enumerate(vision_features):
-            self.register_buffer(f'vision_feat_{i}', feat)
+        # Reconstruct Prompt object
+        # Note: Prompt object is just a container, but SequenceGeometryEncoder expects it.
+        # We can't pass the object directly to exported graph, so we pass tensors and reconstruct inside.
         
-        for i, pos in enumerate(vision_pos_enc):
-            self.register_buffer(f'vision_pos_{i}', pos)
+        # However, SequenceGeometryEncoder.forward takes `geo_prompt: Prompt`.
+        # torch.export might trace through the Prompt object if it's just a container.
+        # But constructing it inside forward is safer for export signature.
         
-        self.img_sizes = img_sizes  # List of (H, W) tuples
-        
-    def forward(
-        self,
-        # Point inputs (sequence-first: [num_points, batch, ...])
-        point_coords,      # [num_points, batch, 2] - normalized xy coordinates
-        point_labels,      # [num_points, batch] - 1=foreground, 0=background
-        point_mask,        # [batch, num_points] - False=valid
-        # Box inputs (sequence-first: [num_boxes, batch, ...])
-        box_coords,        # [num_boxes, batch, 4] - normalized cxcywh
-        box_labels,        # [num_boxes, batch] - 1=positive
-        box_mask,          # [batch, num_boxes] - False=valid
-    ):
-        """
-        Forward pass with simplified tensor interface.
-        
-        All inputs use standard PyTorch tensor formats for easier export.
-        """
-        # Reconstruct Prompt object from tensors
-        prompt = Prompt(
-            point_embeddings=point_coords,
-            point_labels=point_labels,
+        geo_prompt = Prompt(
+            point_embeddings=point_embeddings,
             point_mask=point_mask,
-            box_embeddings=box_coords,
-            box_labels=box_labels,
+            point_labels=point_labels,
+            box_embeddings=box_embeddings,
             box_mask=box_mask,
+            box_labels=box_labels,
+            mask_embeddings=None,
+            mask_mask=None,
+            mask_labels=None
         )
         
-        # Reconstruct vision feature lists from buffers
-        vision_feats = [getattr(self, f'vision_feat_{i}') for i in range(4)]
-        vision_pos = [getattr(self, f'vision_pos_{i}') for i in range(4)]
+        # img_feats is expected to be a list, but we only use the last one for pooling
+        # SequenceGeometryEncoder: seq_first_img_feats = img_feats[-1]
+        img_feats = [img_feats_last]
         
-        # Call geometry encoder
-        geo_embeds, geo_mask = self.geometry_encoder(
-            geo_prompt=prompt,
-            img_feats=vision_feats,
-            img_sizes=self.img_sizes,
-            img_pos_embeds=vision_pos,
-        )
+        # img_sizes is list of (H, W) tuples
+        img_sizes = [(img_size_h, img_size_w)]
         
-        # Return just the embeddings (mask is hard to export)
-        # In production, you'd need the mask too, but for testing this is fine
-        return geo_embeds
+        return self.encoder(geo_prompt, img_feats, img_sizes)
+
+def prepare_dummy_inputs():
+    bs = 1
+    d_model = 256
+    
+    # Points
+    n_points = 5
+    point_embeddings = torch.rand(n_points, bs, 2) # Normalized [0, 1]
+    point_mask = torch.zeros(bs, n_points, dtype=torch.bool)
+    point_labels = torch.ones(n_points, bs, dtype=torch.long)
+    
+    # Boxes
+    n_boxes = 2
+    box_embeddings = torch.rand(n_boxes, bs, 4) # Normalized CxCyWH
+    box_mask = torch.zeros(bs, n_boxes, dtype=torch.bool)
+    box_labels = torch.ones(n_boxes, bs, dtype=torch.long)
+    
+    # Image features for pooling
+    # Shape: [H*W, B, C] (sequence first)
+    H, W = 64, 64
+    img_feats_last = torch.randn(H*W, bs, d_model)
+    
+    return (point_embeddings, point_mask, point_labels,
+            box_embeddings, box_mask, box_labels,
+            img_feats_last, H, W)
 
 def export_geometry_encoder():
-    """Export the geometry encoder with pre-computed vision features."""
+    print("=== Building Geometry Encoder ===")
+    encoder = build_geometry_encoder()
+    wrapper = GeometryEncoderWrapper(encoder)
+    wrapper.eval()
     
-    print("=== Building SAM3 Model ===")
-    model = build_sam3_image_model(
-        checkpoint_path=None,
-        eval_mode=True,
-        load_from_HF=False,
-    )
+    inputs = prepare_dummy_inputs()
     
-    geometry_encoder = model.geometry_encoder
-    vision_backbone = model.backbone.vision_backbone
-    
-    # Force CPU to avoid device mismatch issues
-    geometry_encoder = geometry_encoder.to('cpu')
-    vision_backbone = vision_backbone.to('cpu')
-    
-    geometry_encoder.eval()
-    vision_backbone.eval()
-    
-    # Get vision features from a sample image
-    print("\n=== Computing Vision Features ===")
-    dummy_image = torch.randn(2, 3, 1008, 1008)  # Batch of 2
-    normalized_image = (dummy_image - 0.5) / 0.5
-    
-    with torch.no_grad():
-        sam3_features, sam3_pos_enc, _, _ = vision_backbone(normalized_image)
-    
-    print(f"Vision features: {len(sam3_features)} scales")
-    for i, feat in enumerate(sam3_features):
-        print(f"  Scale {i}: {feat.shape}")
-    
-    # These features are [B, C, H, W], need to convert to sequence-first for geo encoder
-    # But wait - let me check the actual format expected...
-    # Actually, looking at the neck code, it returns [B, C, H, W]
-    # But geometry_encoder expects sequence-first: [H*W, B, C]
-    
-    # Convert to sequence-first format
-    print("\n=== Converting to Sequence-First Format ===")
-    seq_first_features = []
-    img_sizes = []
-    
-    for feat in sam3_features:
-        B, C, H, W = feat.shape
-        # Reshape to [H*W, B, C]
-        feat_seq = feat.permute(2, 3, 0, 1).reshape(H*W, B, C)
-        seq_first_features.append(feat_seq)
-        img_sizes.append((H, W))
-        print(f"  Converted {feat.shape} -> {feat_seq.shape}, img_size={img_sizes[-1]}")
-    
-    # Do the same for position encodings
-    seq_first_pos = []
-    for pos in sam3_pos_enc:
-        B, C, H, W = pos.shape
-        pos_seq = pos.permute(2, 3, 0, 1).reshape(H*W, B, C)
-        seq_first_pos.append(pos_seq)
-    
-    # Create dummy prompts (sequence-first format)
-    print("\n=== Creating Dummy Prompts ===")
-    batch_size = 2
-    
-    # Points: [num_points, batch, 2]
-    point_coords = torch.tensor([
-        [[0.5, 0.5], [0.3, 0.7]],  # First point for each batch
-        [[0.6, 0.4], [0.8, 0.2]],  # Second point
-    ], dtype=torch.float32)
-    
-    point_labels = torch.tensor([
-        [1, 1],  # Both foreground
-        [1, 0],  # Mixed
-    ], dtype=torch.long)
-    
-    point_mask = torch.tensor([
-        [False, False],  # Batch 0: 2 valid points
-        [False, False],  # Batch 1: 2 valid points
-    ], dtype=torch.bool)
-    
-    # Boxes: [num_boxes, batch, 4]
-    box_coords = torch.tensor([
-        [[0.5, 0.5, 0.4, 0.4], [0.3, 0.3, 0.2, 0.2]],
-    ], dtype=torch.float32)
-    
-    box_labels = torch.tensor([
-        [1, 1],
-    ], dtype=torch.long)
-    
-    box_mask = torch.tensor([
-        [False],  # Batch 0: 1 valid box
-        [False],  # Batch 1: 1 valid box
-    ], dtype=torch.bool)
-    
-    print(f"Point coords: {point_coords.shape}")
-    print(f"Box coords: {box_coords.shape}")
-    
-    # Create wrapper
-    print("\n=== Creating Wrapper ===")
-    wrapped_encoder = GeometryEncoderWrapper(
-        geometry_encoder,
-        seq_first_features,
-        img_sizes,
-        seq_first_pos,
-    )
-    wrapped_encoder.eval()
-    
-    # Test forward pass
     print("\n=== Testing Forward Pass ===")
-    try:
-        with torch.no_grad():
-            geo_embeds = wrapped_encoder(
-                point_coords,
-                point_labels,
-                point_mask,
-                box_coords,
-                box_labels,
-                box_mask,
-            )
-        print(f"✓ Forward pass successful!")
-        print(f"  Geometry embeddings: {geo_embeds.shape}")
-    except Exception as e:
-        print(f"✗ Forward pass failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+    with torch.no_grad():
+        outputs = wrapper(*inputs)
+    print("✓ Forward pass succeeded")
+    # Output is (final_embeds, final_mask)
+    print(f"  embeds: {outputs[0].shape}")
+    print(f"  mask: {outputs[1].shape}")
     
-    # Export
     print("\n=== Exporting with torch.export ===")
     try:
         exported_program = torch.export.export(
-            wrapped_encoder,
-            (
-                point_coords,
-                point_labels,
-                point_mask,
-                box_coords,
-                box_labels,
-                box_mask,
-            ),
-            strict=False,
+            wrapper,
+            inputs,
+            strict=True
         )
-        print("✓ Successfully exported!")
-        
-        # Save
-        torch.export.save(exported_program, "sam3_geometry_encoder_exported.pt2")
-        print("  Saved to sam3_geometry_encoder_exported.pt2")
-        
-        return exported_program
-        
-    except Exception as e:
-        print(f"✗ Export failed: {e}")
+    except Exception as err:
+        print(f"✗ Export failed: {err}")
         import traceback
         traceback.print_exc()
         return None
-
-def import_to_tvm(exported_program):
-    """Attempt to import to TVM."""
+        
+    torch.export.save(exported_program, "sam3_geometry_encoder_exported.pt2")
+    print("✓ Exported to sam3_geometry_encoder_exported.pt2")
     
-    if exported_program is None:
-        print("No exported program to import")
-        return
-    
-    print("\n=== Importing to TVM Relax ===")
-    
+    print("\n=== Importing to TVM ===")
     try:
-        import tvm
-        from tvm import relax
-        from tvm.relax.frontend.torch import from_exported_program
+        mod = from_exported_program(exported_program, keep_params_as_input=True)
+        print("✓ TVM import succeeded")
         
-        print("Importing...")
-        mod = from_exported_program(
-            exported_program,
-            keep_params_as_input=False
-        )
+        # Basic verification
+        print("\nRelax Module:")
+        print(mod.script(show_meta=False))
         
-        print("✓ Successfully imported to TVM Relax!")
-        print("\n=== TVM Module Summary ===")
-        print(mod)
-        
-        # Save
+        # Save Relax IR
         with open("sam3_geometry_encoder_tvm.txt", "w") as f:
-            f.write(str(mod))
-        print("\n  Saved TVM IR to sam3_geometry_encoder_tvm.txt")
-        
-        return mod
-        
-    except Exception as e:
-        print(f"✗ TVM import failed: {e}")
+            f.write(mod.script(show_meta=False))
+            
+    except Exception as err:
+        print(f"✗ TVM import failed: {err}")
         import traceback
         traceback.print_exc()
-        return None
 
 if __name__ == "__main__":
-    exported_program = export_geometry_encoder()
-    if exported_program:
-        tvm_mod = import_to_tvm(exported_program)
+    export_geometry_encoder()
