@@ -91,6 +91,15 @@ This document tracks the progress of porting SAM3 to TVM.
 - **Script**: `scripts/export_decoder.py`
 - **Export**: ✅ SUCCESS - saved to `sam3_transformer_decoder_exported.pt2`
 - **TVM Import**: ✅ SUCCESS
+#### [x] Export Image Encoder
+- **File**: `sam3/model/vitdet.py::ViT` + `sam3/model/necks.py::Sam3DualViTDetNeck`
+- **Script**: `scripts/export_image_encoder.py`
+- **Export**: ✅ SUCCESS - saved to `sam3_image_encoder_exported.pt2`
+- **TVM Import**: ❌ BLOCKED
+- **Blocker**: `NotImplementedError: input_type torch.complex64 is not handled yet` (due to RoPE).
+- **Notes**:
+    - Requires `complex64` support in TVM Relax frontend.
+    - `Sam3DualViTDetNeck` expects a Tensor input (despite type hint saying List).
 - **Patches Applied**:
   - `scripts/export_decoder.py`: Used `strict=True` in `torch.export.export` to correctly handle guards without monkeypatching `is_dynamo_compiling`.
   - `scripts/export_decoder.py`: Monkeypatched `BaseFXGraphImporter._div` to handle `floor_divide` type mismatch (float vs int).
