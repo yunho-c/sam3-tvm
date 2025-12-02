@@ -1,173 +1,189 @@
-"""
-Export SAM3 Transformer Encoder (TransformerEncoderFusion) with torch.export and
-optionally import to TVM Relax.
-
-The goal is to exercise the encoder's cross-attention stack without pulling in
-the full SAM3 model. Inputs are plain tensors shaped like the real model:
-- Vision features: list of one (batch, d_model, H, W) tensor
-- Vision positional encodings: matching (batch, d_model, H, W)
-- Text prompt embeddings: (batch, prompt_len, d_model)
-- Prompt padding mask: (batch, prompt_len) bool
-- Vision padding mask: (batch, H, W) bool
-"""
 
 import torch
-import mock_setup  # noqa: F401 - ensures external deps are mocked before import
-import tvm_custom_ops  # noqa: F401 - runtime shim adding missing PyTorch op converters
-from sam3.model_builder import build_sam3_image_model
+import torch.nn as nn
+import tvm
+from tvm import relax
+from tvm.relax.frontend.torch import from_exported_program
 
+import sys
+import types
+from unittest.mock import MagicMock
 
-class TransformerEncoderWrapper(torch.nn.Module):
-    """Flatten dict outputs so torch.export produces a tensor tuple."""
+# Mock triton and decord
+triton = types.ModuleType("triton")
+triton.language = MagicMock()
+triton.compiler = MagicMock()
+triton.jit = MagicMock()
+triton.runtime = types.ModuleType("triton.runtime")
+triton.runtime.autotuner = MagicMock()
+triton.runtime.jit = MagicMock()
+triton.runtime.driver = MagicMock()
+triton.Config = MagicMock()
+triton.__version__ = "2.0.0"
 
-    def __init__(self, encoder: torch.nn.Module, feat_size_hw: int):
-        super().__init__()
-        self.encoder = encoder
-        self.feat_size_hw = feat_size_hw
+sys.modules["triton"] = triton
+sys.modules["triton.language"] = triton.language
+sys.modules["triton.compiler"] = triton.compiler
+sys.modules["triton.runtime"] = triton.runtime
+sys.modules["triton.runtime.autotuner"] = triton.runtime.autotuner
+sys.modules["triton.runtime.jit"] = triton.runtime.jit
+sys.modules["triton.runtime.driver"] = triton.runtime.driver
 
-    def forward(
-        self,
-        vision_feat_seq: torch.Tensor,
-        vision_pos_seq: torch.Tensor,
-        prompt: torch.Tensor,
-        prompt_mask: torch.Tensor,
-    ):
-        # Provide feat_sizes so the encoder reshapes seq-first tensors back to (bs, c, h, w)
-        feat_sizes = [(self.feat_size_hw, self.feat_size_hw)]
-        out = self.encoder(
-            src=[vision_feat_seq],
-            src_key_padding_mask=None,
-            src_pos=[vision_pos_seq],
-            prompt=prompt,
-            prompt_key_padding_mask=prompt_mask,
-            prompt_pos=None,
-            feat_sizes=feat_sizes,
-            encoder_extra_kwargs=None,
-        )
+sys.modules["decord"] = MagicMock()
 
-        return (
-            out["memory"],
-            out["padding_mask"],
-            out["pos_embed"],
-            out["memory_text"],
-            out["level_start_index"],
-            out["spatial_shapes"],
-            out["valid_ratios"],
-        )
+# Import SAM3 components
+from sam3.model.encoder import TransformerEncoderFusion, TransformerEncoderLayer
+from sam3.model.model_misc import MultiheadAttentionWrapper as MultiheadAttention
 
-
-def build_encoder() -> torch.nn.Module:
-    """Create the SAM3 transformer encoder with pretrained weights if present."""
-
-    model = build_sam3_image_model(
-        checkpoint_path=None,
-        eval_mode=True,
-        load_from_HF=False,
-        enable_segmentation=False,
+def build_transformer_encoder():
+    """
+    Reconstructs the Transformer Encoder as defined in sam3/model_builder.py
+    """
+    encoder_layer = TransformerEncoderLayer(
+        activation="relu",
+        d_model=256,
+        dim_feedforward=2048,
+        dropout=0.1,
+        pos_enc_at_attn=True,
+        pos_enc_at_cross_attn_keys=False,
+        pos_enc_at_cross_attn_queries=False,
+        pre_norm=True,
+        self_attention=MultiheadAttention(
+            num_heads=8,
+            dropout=0.1,
+            embed_dim=256,
+            batch_first=True,
+        ),
+        cross_attention=MultiheadAttention(
+            num_heads=8,
+            dropout=0.1,
+            embed_dim=256,
+            batch_first=True,
+        ),
     )
-    encoder = model.transformer.encoder
-    encoder = encoder.to("cpu").eval()
+
+    encoder = TransformerEncoderFusion(
+        layer=encoder_layer,
+        num_layers=6,
+        d_model=256,
+        num_feature_levels=1,
+        frozen=False,
+        use_act_checkpoint=False, # Disable for export
+        add_pooled_text_to_img_feat=False,
+        pool_text_with_mask=True,
+    )
     return encoder
 
+class TransformerEncoderWrapper(nn.Module):
+    def __init__(self, encoder):
+        super().__init__()
+        self.encoder = encoder
 
-def prepare_dummy_inputs(
-    batch_size: int = 2,
-    d_model: int = 256,
-    height: int = 16,
-    width: int = 16,
-    prompt_len: int = 8,
-):
-    """Create deterministic dummy tensors matching encoder expectations."""
+    def forward(self, 
+                src_tensor, src_pos_tensor, 
+                prompt, prompt_key_padding_mask):
+        
+        # Wrap single tensor inputs into lists as expected by the encoder
+        # Assuming single feature level for now
+        src = [src_tensor]
+        src_pos = [src_pos_tensor]
+        
+        # src_key_padding_mask is optional, we can pass None or a list
+        src_key_padding_mask = None
+        
+        # We pass feat_sizes to avoid the buggy x.dim == 4 check in the else block
+        # src_tensor is [L, B, C] where L = h*w
+        # We assume h=w=sqrt(L) for simplicity in this export wrapper
+        L = src_tensor.shape[0]
+        h = int(L**0.5)
+        w = h
+        assert h * w == L, "L must be a perfect square for this export wrapper"
+        feat_sizes = [(h, w)]
+        
+        outputs = self.encoder(
+            src=src,
+            prompt=prompt,
+            src_key_padding_mask=src_key_padding_mask,
+            src_pos=src_pos,
+            prompt_key_padding_mask=prompt_key_padding_mask,
+            prompt_pos=None, # Optional
+            feat_sizes=feat_sizes,
+            encoder_extra_kwargs=None
+        )
+        
+        # Return relevant outputs
+        # outputs is a dict: "memory", "padding_mask", "pos_embed", "memory_text", ...
+        return outputs["memory"], outputs["pos_embed"]
 
-    torch.manual_seed(0)
-    hw = height * width
-    # Sequence-first tensors: [HW, B, C]
-    vision_feat = torch.randn(hw, batch_size, d_model)
-    vision_pos = torch.randn(hw, batch_size, d_model)
-    # Prompt is seq-first so that encoder's transpose yields batch-first
-    prompt = torch.randn(prompt_len, batch_size, d_model)
-    prompt_mask = torch.zeros(batch_size, prompt_len, dtype=torch.bool)
-    return vision_feat, vision_pos, prompt, prompt_mask, height
-
+def prepare_dummy_inputs():
+    bs = 1
+    d_model = 256
+    h, w = 32, 32 # Feature map size
+    seq_len_src = h * w
+    
+    # src: [L, B, C] (flattened spatial)
+    src_tensor = torch.randn(seq_len_src, bs, d_model)
+    
+    # src_pos: [L, B, C]
+    src_pos_tensor = torch.randn(seq_len_src, bs, d_model)
+    
+    # prompt: [seq_len, bs, d_model]
+    seq_len = 10
+    prompt = torch.randn(seq_len, bs, d_model)
+    
+    # prompt_key_padding_mask: [bs, seq_len]
+    prompt_key_padding_mask = torch.zeros(bs, seq_len, dtype=torch.bool)
+    
+    return (src_tensor, src_pos_tensor, prompt, prompt_key_padding_mask)
 
 def export_transformer_encoder():
-    """Export TransformerEncoderFusion with torch.export."""
-
     print("=== Building Transformer Encoder ===")
-    encoder = build_encoder()
-    # height==width for dummy grid; pass through for feat_sizes reconstruction
-    dummy_inputs = prepare_dummy_inputs()
-    wrapper = TransformerEncoderWrapper(encoder, feat_size_hw=dummy_inputs[-1])
+    encoder = build_transformer_encoder()
+    wrapper = TransformerEncoderWrapper(encoder)
     wrapper.eval()
-
-    inputs = dummy_inputs[:-1]
-    print("Dummy inputs prepared:")
-    print(f"  vision_feat_seq (HW, B, C): {inputs[0].shape}")
-    print(f"  vision_pos_seq  (HW, B, C): {inputs[1].shape}")
-    print(f"  prompt          (S, B, C): {inputs[2].shape}")
-    print(f"  prompt_mask: {inputs[3].shape}")
-
+    
+    inputs = prepare_dummy_inputs()
+    
     print("\n=== Testing Forward Pass ===")
     with torch.no_grad():
         outputs = wrapper(*inputs)
     print("✓ Forward pass succeeded")
-    for i, t in enumerate(outputs):
-        print(f"  output[{i}]: {t if t is None else t.shape}")
-
+    print(f"  memory: {outputs[0].shape}")
+    print(f"  pos_embed: {outputs[1].shape}")
+    
     print("\n=== Exporting with torch.export ===")
     try:
         exported_program = torch.export.export(
             wrapper,
             inputs,
-            strict=False,
+            strict=True
         )
-    except Exception as err:  # pragma: no cover - export failure path
+    except Exception as err:
         print(f"✗ Export failed: {err}")
         import traceback
-
         traceback.print_exc()
         return None
-
+        
     torch.export.save(exported_program, "sam3_transformer_encoder_exported.pt2")
     print("✓ Exported to sam3_transformer_encoder_exported.pt2")
-    return exported_program
-
-
-def import_to_tvm(exported_program):
-    """Attempt to import the exported encoder into TVM Relax."""
-
-    if exported_program is None:
-        print("No exported program to import")
-        return None
-
-    print("\n=== Importing to TVM Relax ===")
+    
+    print("\n=== Importing to TVM ===")
     try:
-        import tvm
-        from tvm.relax.frontend.torch import from_exported_program
-    except Exception as err:  # pragma: no cover - import failure path
-        print(f"✗ TVM not available: {err}")
-        return None
-
-    try:
-        mod = from_exported_program(
-            exported_program,
-            keep_params_as_input=False,
-        )
-    except Exception as err:  # pragma: no cover - converter failure path
+        mod = from_exported_program(exported_program, keep_params_as_input=True)
+        print("✓ TVM import succeeded")
+        
+        # Basic verification
+        print("\nRelax Module:")
+        print(mod.script(show_meta=False))
+        
+        # Save Relax IR
+        with open("sam3_transformer_encoder_tvm.txt", "w") as f:
+            f.write(mod.script(show_meta=False))
+            
+    except Exception as err:
         print(f"✗ TVM import failed: {err}")
         import traceback
-
         traceback.print_exc()
-        return None
-
-    print("✓ Imported encoder to TVM Relax")
-    with open("sam3_transformer_encoder_tvm.txt", "w") as f:
-        f.write(str(mod))
-    print("  Saved TVM IR to sam3_transformer_encoder_tvm.txt")
-    return mod
-
 
 if __name__ == "__main__":
-    exported = export_transformer_encoder()
-    if exported is not None:
-        import_to_tvm(exported)
+    export_transformer_encoder()

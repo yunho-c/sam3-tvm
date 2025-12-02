@@ -79,13 +79,12 @@ This document tracks the progress of porting SAM3 to TVM.
 #### [x] Export Transformer Encoder
 - **File**: `sam3/model/encoder.py::TransformerEncoderFusion`
 - **Script**: `scripts/export_transformer_encoder.py`
-- **Ops to verify**: 
-  - Multi-head attention
-  - Layer norm
-  - Cross-attention
-- **Expected complexity**: Medium
-- **Notes**: No RoPE, tests cross-attention support
- - **Status**: Export + TVM import succeed using runtime shim (`scripts/tvm_custom_ops.py`) to patch `aten::prod.dim_int` into TVM’s convert map (hacky; replace with upstream converter)
+- **Export**: ✅ SUCCESS - saved to `sam3_transformer_encoder_exported.pt2`
+- **TVM Import**: ✅ SUCCESS - saved to `sam3_transformer_encoder_tvm.txt`
+- **Notes**:
+    - Requires passing `feat_sizes` to `forward` to avoid a bug in `sam3/model/encoder.py`.
+    - Input `src` must be flattened `[L, B, C]` when `feat_sizes` is used.
+    - Fully supported by TVM Relax (standard attention ops).
 
 #### [x] Export Transformer Decoder
 - **File**: `sam3/model/decoder.py::TransformerDecoder`
