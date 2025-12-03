@@ -64,6 +64,16 @@ This document tracks the progress of porting SAM3 to TVM.
 
 ### Priority 1: Core Components
 
+#### [x] Export Vision Backbone (**Exported & Imported**)
+- **File**: `sam3/model/image_encoder.py` (via `build_sam3_image_model`)
+- **Script**: `scripts/export_vision_backbone.py`
+- **Export**: ✅ SUCCESS - saved to `sam3_vision_backbone_exported.pt2`
+- **TVM Import**: ✅ SUCCESS
+- **Blockers Resolved**:
+  - `complex64` (RoPE) patched via `scripts/patch_rope.py`
+- **Notes**:
+  - Uses `patch_rope.py` to replace complex RoPE with float arithmetic.
+  - Output is a tuple of multi-scale feature maps.
 #### [x] Export Geometry Encoder (**Exported & Imported**)
 - **File**: `sam3/model/geometry_encoders.py::SequenceGeometryEncoder`
 - **Script**: `scripts/export_geometry_encoder.py`

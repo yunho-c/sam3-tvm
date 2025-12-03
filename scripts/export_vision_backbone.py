@@ -7,6 +7,15 @@ This is the recommended approach for PyTorch 2.0+ models.
 import torch
 import mock_setup
 from sam3.model_builder import build_sam3_image_model
+import sys
+import os
+
+# Apply RoPE patches
+import patch_rope
+patch_rope.apply_patches()
+
+# Apply TVM custom ops (scatter, roi_align, floor_divide)
+import tvm_custom_ops # noqa: F401
 
 class VisionBackboneWrapper(torch.nn.Module):
     """Wrapper for vision backbone that returns only tensors."""
