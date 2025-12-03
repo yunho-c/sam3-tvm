@@ -4,38 +4,106 @@ import torch.nn as nn
 import tvm
 from tvm import relax
 from tvm.relax.frontend.torch import from_exported_program
+import mock_setup
 
-import sys
-import types
-from unittest.mock import MagicMock
-
-# Mock triton and decord as they are not needed for export and might be missing
-# Mock triton as a package
-triton = types.ModuleType("triton")
-triton.language = MagicMock()
-triton.compiler = MagicMock()
-triton.jit = MagicMock()
-triton.runtime = types.ModuleType("triton.runtime")
-triton.runtime.autotuner = MagicMock()
-triton.runtime.jit = MagicMock()
-triton.runtime.driver = MagicMock()
-triton.Config = MagicMock()
-triton.__version__ = "2.0.0"
-
-sys.modules["triton"] = triton
-sys.modules["triton.language"] = triton.language
-sys.modules["triton.compiler"] = triton.compiler
-sys.modules["triton.runtime"] = triton.runtime
-sys.modules["triton.runtime.autotuner"] = triton.runtime.autotuner
-sys.modules["triton.runtime.jit"] = triton.runtime.jit
-sys.modules["triton.runtime.driver"] = triton.runtime.driver
-
-sys.modules["decord"] = MagicMock()
+# ... (mocks)
 
 # Import SAM3 components
 from sam3.model.model_misc import DotProductScoring, MLP
 
+# Monkeypatch DotProductScoring.mean_pool_text to avoid bitwise not on bool
+def mean_pool_text_patched(self, prompt, prompt_mask):
+    # prompt_mask: 1 is valid, 0 is padding (based on comment in original code)
+    # BUT based on usage (~prompt_mask), it seems 0 is valid, 1 is padding (standard PyTorch).
+    # Original: is_valid = (~prompt_mask).float().permute(1, 0)[..., None]
+    
+    # We replace (~prompt_mask).float() with (1.0 - prompt_mask.float())
+    # This assumes prompt_mask is 0/1 or False/True.
+    # If prompt_mask is Bool:
+    # True (Padding) -> float 1.0 -> 1.0 - 1.0 = 0.0 (Invalid)
+    # False (Valid) -> float 0.0 -> 1.0 - 0.0 = 1.0 (Valid)
+    # This matches ~prompt_mask behavior for True/False.
+    
+    is_valid = (1.0 - prompt_mask.float()).permute(1, 0)[..., None]
+    
+    # num_valid has shape (bs, 1)
+    num_valid = torch.clamp(torch.sum(is_valid, dim=0), min=1.0)
+    # mean pool over all the valid tokens -- pooled_prompt has shape (bs, proj_dim)
+    pooled_prompt = (prompt * is_valid).sum(dim=0) / num_valid
+    return pooled_prompt
+
+DotProductScoring.mean_pool_text = mean_pool_text_patched
+
 def build_scoring_head():
+    """
+    Reconstructs the Scoring Head as defined in sam3/model_builder.py
+    """
+    prompt_mlp = MLP(
+        input_dim=256,
+        hidden_dim=2048,
+        output_dim=256,
+        num_layers=2,
+        dropout=0.1,
+        residual=True,
+        out_norm=nn.LayerNorm(256),
+    )
+    return DotProductScoring(d_model=256, d_proj=256, prompt_mlp=prompt_mlp)
+
+# ... (prepare_dummy_inputs)
+
+# ... (export_scoring_head)
+
+def import_to_tvm(exported_program):
+    if exported_program is None:
+        return None
+    print("\n=== Importing to TVM ===")
+    try:
+        mod = from_exported_program(exported_program, keep_params_as_input=True)
+        print("✓ TVM import succeeded")
+        
+        # Basic verification
+        print("\nRelax Module:")
+        print(mod.script(show_meta=False))
+        
+        # Save Relax IR
+        with open("sam3_scoring_head_tvm.txt", "w") as f:
+            f.write(mod.script(show_meta=False))
+            
+        # Apply LegalizeOps to decompose LayerNorm to avoid LLVM debug info issue
+        def legalize_layer_norm(bb, call):
+            data = call.args[0]
+            gamma = call.args[1]
+            beta = call.args[2]
+            axis = call.attrs.axes
+            epsilon = call.attrs.epsilon
+            
+            # Cast epsilon to float32
+            eps = relax.const(epsilon, "float32")
+            
+            mean = bb.emit(relax.op.mean(data, axis, keepdims=True))
+            sub = bb.emit(relax.op.subtract(data, mean))
+            sq = bb.emit(relax.op.multiply(sub, sub))
+            var = bb.emit(relax.op.mean(sq, axis, keepdims=True))
+            std = bb.emit(relax.op.sqrt(relax.op.add(var, eps)))
+            out = bb.emit(relax.op.divide(sub, std))
+            out = bb.emit(relax.op.multiply(out, gamma))
+            out = bb.emit(relax.op.add(out, beta))
+            return out
+
+        print("\n=== Applying LayerNorm Legalization ===")
+        mod = relax.transform.LegalizeOps({"relax.nn.layer_norm": legalize_layer_norm})(mod)
+            
+        print("\n=== Compiling with TVM Relax ===")
+        ex = relax.build(mod, target="llvm")
+        print("✓ Successfully compiled!")
+        
+        return mod
+            
+    except Exception as err:
+        print(f"✗ TVM import failed: {err}")
+        import traceback
+        traceback.print_exc()
+        return None
     """
     Reconstructs the Scoring Head as defined in sam3/model_builder.py
     """
@@ -127,7 +195,11 @@ def export_scoring_head():
         
     torch.export.save(exported_program, "sam3_scoring_head_exported.pt2")
     print("✓ Exported to sam3_scoring_head_exported.pt2")
-    
+    return exported_program
+
+def import_to_tvm(exported_program):
+    if exported_program is None:
+        return None
     print("\n=== Importing to TVM ===")
     try:
         mod = from_exported_program(exported_program, keep_params_as_input=True)
@@ -140,11 +212,15 @@ def export_scoring_head():
         # Save Relax IR
         with open("sam3_scoring_head_tvm.txt", "w") as f:
             f.write(mod.script(show_meta=False))
+        return mod
             
     except Exception as err:
         print(f"✗ TVM import failed: {err}")
         import traceback
         traceback.print_exc()
+        return None
 
 if __name__ == "__main__":
-    export_scoring_head()
+    prog = export_scoring_head()
+    if prog:
+        import_to_tvm(prog)

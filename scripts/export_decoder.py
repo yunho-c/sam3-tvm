@@ -3,10 +3,132 @@ Export SAM3 Transformer Decoder with torch.export and optionally import to TVM R
 """
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
 import mock_setup  # noqa: F401
 import tvm_custom_ops  # noqa: F401
+from manual_attention import ManualMultiheadAttention
+
+# Patch globally
+torch.nn.MultiheadAttention = ManualMultiheadAttention
+
 from sam3.model_builder import build_sam3_image_model
 from sam3.model.decoder import TransformerDecoder
+
+# ... (rest of imports)
+
+# ... (wrapper and build_decoder)
+
+# ... (prepare_dummy_inputs)
+
+# ... (export_decoder)
+
+def import_to_tvm(exported_program):
+    if exported_program is None:
+        return None
+
+    print("\n=== Importing to TVM Relax ===")
+    try:
+        import tvm
+        from tvm.relax.frontend.torch import from_exported_program
+    except Exception as err:
+        print(f"✗ TVM not available: {err}")
+        return None
+
+    # Monkeypatch BaseFXGraphImporter._div to handle type mismatch in floor_divide
+    from tvm.relax.frontend.torch.base_fx_graph_translator import BaseFXGraphImporter
+    from tvm import relax
+    import torch.fx as fx
+    
+    original_div = BaseFXGraphImporter._div
+    
+    def patched_div(self, node: fx.Node) -> relax.Var:
+        args = self.retrieve_args(node)
+        inp_1 = args[0]
+        inp_2 = args[1]
+
+        # Handle scalar cases
+        if isinstance(inp_2, (int, float)):
+            inp_2 = relax.const(inp_2)
+
+        # Get rounding_mode from node kwargs
+        rounding_mode = args[2] if len(node.args) > 2 else node.kwargs.get("rounding_mode", None)
+
+        # Perform division based on rounding mode
+        if rounding_mode == "floor":
+            # Check types and cast if mismatch
+            dtype1 = inp_1.struct_info.dtype if hasattr(inp_1, "struct_info") else None
+            dtype2 = inp_2.struct_info.dtype if hasattr(inp_2, "struct_info") else None
+            
+            if dtype1 and dtype2 and dtype1 != dtype2:
+                # If one is float and other is int, cast int to float
+                if "float" in dtype1 and "int" in dtype2:
+                     inp_2 = self.block_builder.emit(relax.op.astype(inp_2, dtype1))
+                elif "int" in dtype1 and "float" in dtype2:
+                     inp_1 = self.block_builder.emit(relax.op.astype(inp_1, dtype2))
+            
+            return self.block_builder.emit(relax.op.floor_divide(inp_1, inp_2))
+        else:
+            if rounding_mode is None:
+                # True division (normal float division)
+                return self.block_builder.emit(relax.op.divide(inp_1, inp_2))
+            elif rounding_mode == "trunc":
+                # Trunc division: perform true division then truncate
+                true_div = self.block_builder.emit(relax.op.divide(inp_1, inp_2))
+                return self.block_builder.emit(relax.op.trunc(true_div))
+            else:
+                raise ValueError(f"Unsupported rounding_mode: {rounding_mode}")
+
+    BaseFXGraphImporter._div = patched_div
+
+    print("\n=== Importing to TVM Relax ===")
+    try:
+        mod = from_exported_program(
+            exported_program,
+            keep_params_as_input=False,
+        )
+        mod.show()
+    except Exception as err:
+        print(f"✗ TVM import failed: {err}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+    print("✓ Imported decoder to TVM Relax")
+    with open("sam3_transformer_decoder_tvm.txt", "w") as f:
+        f.write(str(mod))
+    print("  Saved TVM IR to sam3_transformer_decoder_tvm.txt")
+    
+    # Apply LegalizeOps to decompose LayerNorm to avoid LLVM debug info issue
+    def legalize_layer_norm(bb, call):
+        data = call.args[0]
+        gamma = call.args[1]
+        beta = call.args[2]
+        axis = call.attrs.axes
+        epsilon = call.attrs.epsilon
+        
+        # Cast epsilon to float32
+        eps = relax.const(epsilon, "float32")
+        
+        mean = bb.emit(relax.op.mean(data, axis, keepdims=True))
+        sub = bb.emit(relax.op.subtract(data, mean))
+        sq = bb.emit(relax.op.multiply(sub, sub))
+        var = bb.emit(relax.op.mean(sq, axis, keepdims=True))
+        std = bb.emit(relax.op.sqrt(relax.op.add(var, eps)))
+        out = bb.emit(relax.op.divide(sub, std))
+        out = bb.emit(relax.op.multiply(out, gamma))
+        out = bb.emit(relax.op.add(out, beta))
+        return out
+
+    print("\n=== Applying LayerNorm Legalization ===")
+    mod = relax.transform.LegalizeOps({"relax.nn.layer_norm": legalize_layer_norm})(mod)
+        
+    print("\n=== Compiling with TVM Relax ===")
+    ex = relax.build(mod, target="llvm")
+    print("✓ Successfully compiled!")
+    
+    return mod
 
 class TransformerDecoderWrapper(torch.nn.Module):
     """Wrapper to handle optional inputs and tuple outputs for export."""

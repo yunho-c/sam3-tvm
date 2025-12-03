@@ -31,9 +31,20 @@ sys.modules["triton.runtime.driver"] = triton.runtime.driver
 
 sys.modules["decord"] = MagicMock()
 
+import mock_setup
+from manual_attention import ManualMultiheadAttention
+
 # Import SAM3 components
 from sam3.model.encoder import TransformerEncoderFusion, TransformerEncoderLayer
 from sam3.model.model_misc import MultiheadAttentionWrapper as MultiheadAttention
+import math
+import torch.nn.functional as F
+
+# Patch globally
+torch.nn.MultiheadAttention = ManualMultiheadAttention
+
+# Replace MultiheadAttention
+MultiheadAttention = ManualMultiheadAttention
 
 def build_transformer_encoder():
     """
@@ -166,7 +177,11 @@ def export_transformer_encoder():
         
     torch.export.save(exported_program, "sam3_transformer_encoder_exported.pt2")
     print("✓ Exported to sam3_transformer_encoder_exported.pt2")
-    
+    return exported_program
+
+def import_to_tvm(exported_program):
+    if exported_program is None:
+        return None
     print("\n=== Importing to TVM ===")
     try:
         mod = from_exported_program(exported_program, keep_params_as_input=True)
@@ -180,10 +195,43 @@ def export_transformer_encoder():
         with open("sam3_transformer_encoder_tvm.txt", "w") as f:
             f.write(mod.script(show_meta=False))
             
+        # Apply LegalizeOps to decompose LayerNorm to avoid LLVM debug info issue
+        def legalize_layer_norm(bb, call):
+            data = call.args[0]
+            gamma = call.args[1]
+            beta = call.args[2]
+            axis = call.attrs.axes
+            epsilon = call.attrs.epsilon
+            
+            # Cast epsilon to float32
+            eps = relax.const(epsilon, "float32")
+            
+            mean = bb.emit(relax.op.mean(data, axis, keepdims=True))
+            sub = bb.emit(relax.op.subtract(data, mean))
+            sq = bb.emit(relax.op.multiply(sub, sub))
+            var = bb.emit(relax.op.mean(sq, axis, keepdims=True))
+            std = bb.emit(relax.op.sqrt(relax.op.add(var, eps)))
+            out = bb.emit(relax.op.divide(sub, std))
+            out = bb.emit(relax.op.multiply(out, gamma))
+            out = bb.emit(relax.op.add(out, beta))
+            return out
+
+        print("\n=== Applying LayerNorm Legalization ===")
+        mod = relax.transform.LegalizeOps({"relax.nn.layer_norm": legalize_layer_norm})(mod)
+            
+        print("\n=== Compiling with TVM Relax ===")
+        ex = relax.build(mod, target="llvm")
+        print("✓ Successfully compiled!")
+        
+        return mod
+            
     except Exception as err:
         print(f"✗ TVM import failed: {err}")
         import traceback
         traceback.print_exc()
+        return None
 
 if __name__ == "__main__":
-    export_transformer_encoder()
+    prog = export_transformer_encoder()
+    if prog:
+        import_to_tvm(prog)

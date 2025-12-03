@@ -1,39 +1,101 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import math
 import tvm
 from tvm import relax
 from tvm.relax.frontend.torch import from_exported_program
+import mock_setup
+import tvm_custom_ops
+from manual_attention import ManualMultiheadAttention
 
-import sys
-import types
-from unittest.mock import MagicMock
+# Patch globally
+torch.nn.MultiheadAttention = ManualMultiheadAttention
 
-# Mock triton as a package
-triton = types.ModuleType("triton")
-triton.language = MagicMock()
-triton.compiler = MagicMock()
-triton.jit = MagicMock()
-triton.runtime = types.ModuleType("triton.runtime")
-triton.runtime.autotuner = MagicMock()
-triton.runtime.jit = MagicMock()
-triton.runtime.driver = MagicMock()
-triton.Config = MagicMock()
-triton.__version__ = "2.0.0"
-
-sys.modules["triton"] = triton
-sys.modules["triton.language"] = triton.language
-sys.modules["triton.compiler"] = triton.compiler
-sys.modules["triton.runtime"] = triton.runtime
-sys.modules["triton.runtime.autotuner"] = triton.runtime.autotuner
-sys.modules["triton.runtime.jit"] = triton.runtime.jit
-sys.modules["triton.runtime.driver"] = triton.runtime.driver
-
-sys.modules["decord"] = MagicMock()
+# Replace MultiheadAttention
+MultiheadAttention = ManualMultiheadAttention
 
 # Import SAM3 components
 from sam3.model.maskformer_segmentation import UniversalSegmentationHead, PixelDecoder
-from sam3.model.model_misc import MultiheadAttentionWrapper as MultiheadAttention
+
+# ... (rest of file)
+
+def import_to_tvm(exported_program):
+    if exported_program is None:
+        return None
+    print("\n=== Importing to TVM ===")
+    try:
+        mod = from_exported_program(exported_program, keep_params_as_input=True)
+        print("✓ TVM import succeeded")
+        
+        # Basic verification
+        print("\nRelax Module:")
+        print(mod.script(show_meta=False))
+        
+        # Save Relax IR
+        with open("sam3_segmentation_head_tvm.txt", "w") as f:
+            f.write(mod.script(show_meta=False))
+            
+        # Apply LegalizeOps to decompose LayerNorm to avoid LLVM debug info issue
+        def legalize_layer_norm(bb, call):
+            data = call.args[0]
+            gamma = call.args[1]
+            beta = call.args[2]
+            axis = call.attrs.axes
+            epsilon = call.attrs.epsilon
+            
+            # Cast epsilon to float32
+            eps = relax.const(epsilon, "float32")
+            
+            mean = bb.emit(relax.op.mean(data, axis, keepdims=True))
+            sub = bb.emit(relax.op.subtract(data, mean))
+            sq = bb.emit(relax.op.multiply(sub, sub))
+            var = bb.emit(relax.op.mean(sq, axis, keepdims=True))
+            std = bb.emit(relax.op.sqrt(relax.op.add(var, eps)))
+            out = bb.emit(relax.op.divide(sub, std))
+            out = bb.emit(relax.op.multiply(out, gamma))
+            out = bb.emit(relax.op.add(out, beta))
+            return out
+
+        print("\n=== Applying LayerNorm Legalization ===")
+        mod = relax.transform.LegalizeOps({"relax.nn.layer_norm": legalize_layer_norm})(mod)
+            
+        print("\n=== Compiling with TVM Relax ===")
+        ex = relax.build(mod, target="llvm")
+        print("✓ Successfully compiled!")
+        
+        return mod
+            
+    except Exception as err:
+        print(f"✗ TVM import failed: {err}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+# Monkeypatch PixelDecoder.forward to use scale_factor instead of size
+# This avoids dynamic size calculation which causes issues with TVM resize2d expecting PrimExpr
+def pixel_decoder_forward_patched(self, backbone_feats):
+    # Assumes backbone features are already projected (C == hidden dim)
+
+    prev_fpn = backbone_feats[-1]
+    fpn_feats = backbone_feats[:-1]
+    for layer_idx, bb_feat in enumerate(fpn_feats[::-1]):
+        curr_fpn = bb_feat
+        # Use scale_factor=2.0 instead of size=curr_fpn.shape[-2:]
+        # SAM backbone features are typically 1/32, 1/16, 1/8, 1/4, so 2x upsample is correct.
+        prev_fpn = curr_fpn + F.interpolate(
+            prev_fpn, scale_factor=2.0, mode=self.interpolation_mode
+        )
+        if self.shared_conv:
+            # only one conv layer
+            layer_idx = 0
+        prev_fpn = self.conv_layers[layer_idx](prev_fpn)
+        prev_fpn = F.relu(self.norms[layer_idx](prev_fpn))
+
+    return prev_fpn
+
+PixelDecoder.forward = pixel_decoder_forward_patched
 
 def build_segmentation_head():
     """
@@ -45,7 +107,8 @@ def build_segmentation_head():
         hidden_dim=256,
         compile_mode=None,
     )
-
+    
+    # ... (rest of function)
     cross_attend_prompt = MultiheadAttention(
         num_heads=8,
         dropout=0,
@@ -166,10 +229,74 @@ def export_segmentation_head():
     print(f"  semantic_seg: {outputs[1].shape}")
     
     print("\n=== Exporting with torch.export ===")
+    
+    # Define dynamic shapes
+    # We use static spatial shapes to avoid resize2d issues and constraint violations
+    # Input 1024x1024
+    # feat0: 256x256
+    # feat1: 128x128
+    # feat2: 64x64
+    # feat3: 32x32
+    
+    B = 1 # Static batch size
+    
+    # Static spatial dims
+    H0_val, W0_val = 256, 256
+    H1_val, W1_val = 128, 128
+    H2_val, W2_val = 64, 64
+    H3_val, W3_val = 32, 32
+    
+    # S must match feat3 spatial dim (32*32 = 1024)
+    S_val = 1024
+    
+    # NQ is fixed usually
+    NQ_val = 10 # or whatever dummy input uses
+    
+    # P (num_prompts) can be dynamic?
+    # Let's try making P dynamic, everything else static.
+    P = torch.export.Dim("num_prompts", min=1)
+    
+    # Re-create dummy inputs with these shapes to be sure
+    # prepare_dummy_inputs uses hardcoded shapes. We should update them or just rely on them being compatible?
+    # prepare_dummy_inputs used:
+    # feat0: 64x64 -> We need 256x256
+    # So we must update prepare_dummy_inputs or re-generate inputs here.
+    
+    print("Regenerating inputs for static export...")
+    c = 256
+    feat0 = torch.randn(B, c, H0_val, W0_val)
+    feat1 = torch.randn(B, c, H1_val, W1_val)
+    feat2 = torch.randn(B, c, H2_val, W2_val)
+    feat3 = torch.randn(B, c, H3_val, W3_val)
+    
+    num_layers = 2
+    num_queries = 10 # NQ
+    obj_queries = torch.randn(num_layers, B, num_queries, c)
+    
+    encoder_hidden_states = torch.randn(S_val, B, c)
+    
+    num_prompts = 5
+    prompt = torch.randn(num_prompts, B, c)
+    prompt_mask = torch.zeros(B, num_prompts, dtype=torch.bool)
+    
+    inputs = (feat0, feat1, feat2, feat3, obj_queries, encoder_hidden_states, prompt, prompt_mask)
+    
+    dynamic_shapes = (
+        None, # feat0 static
+        None, # feat1 static
+        None, # feat2 static
+        None, # feat3 static
+        None, # obj_queries static
+        None, # encoder_hidden_states static
+        {0: P}, # prompt dynamic P
+        {1: P}, # prompt_mask dynamic P
+    )
+
     try:
         exported_program = torch.export.export(
             wrapper,
             inputs,
+            dynamic_shapes=dynamic_shapes,
             strict=True
         )
     except Exception as err:
@@ -180,7 +307,11 @@ def export_segmentation_head():
         
     torch.export.save(exported_program, "sam3_segmentation_head_exported.pt2")
     print("✓ Exported to sam3_segmentation_head_exported.pt2")
-    
+    return exported_program
+
+def import_to_tvm(exported_program):
+    if exported_program is None:
+        return None
     print("\n=== Importing to TVM ===")
     try:
         mod = from_exported_program(exported_program, keep_params_as_input=True)
@@ -193,11 +324,15 @@ def export_segmentation_head():
         # Save Relax IR
         with open("sam3_segmentation_head_tvm.txt", "w") as f:
             f.write(mod.script(show_meta=False))
+        return mod
             
     except Exception as err:
         print(f"✗ TVM import failed: {err}")
         import traceback
         traceback.print_exc()
+        return None
 
 if __name__ == "__main__":
-    export_segmentation_head()
+    prog = export_segmentation_head()
+    if prog:
+        import_to_tvm(prog)

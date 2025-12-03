@@ -165,24 +165,38 @@ def patch_floor_divide():
         # Handle scalar cases
         if isinstance(inp_2, (int, float)):
             inp_2 = relax.const(inp_2)
+        if isinstance(inp_1, (int, float)):
+            inp_1 = relax.const(inp_1)
 
         # Get rounding_mode from node kwargs
         rounding_mode = args[2] if len(node.args) > 2 else node.kwargs.get("rounding_mode", None)
 
         # Perform division based on rounding mode
         if rounding_mode == "floor":
-            # Check types and cast if mismatch
+            # Check types
             dtype1 = inp_1.struct_info.dtype if hasattr(inp_1, "struct_info") else None
             dtype2 = inp_2.struct_info.dtype if hasattr(inp_2, "struct_info") else None
             
-            if dtype1 and dtype2 and dtype1 != dtype2:
-                # If one is float and other is int, cast int to float
-                if "float" in dtype1 and "int" in dtype2:
-                     inp_2 = self.block_builder.emit(relax.op.astype(inp_2, dtype1))
-                elif "int" in dtype1 and "float" in dtype2:
-                     inp_1 = self.block_builder.emit(relax.op.astype(inp_1, dtype2))
+            is_float = False
+            if (dtype1 and "float" in dtype1) or (dtype2 and "float" in dtype2):
+                is_float = True
             
-            return self.block_builder.emit(relax.op.floor_divide(inp_1, inp_2))
+            if is_float:
+                # Cast both to float if needed
+                if dtype1 and "int" in dtype1:
+                    inp_1 = self.block_builder.emit(relax.op.astype(inp_1, "float32"))
+                if dtype2 and "int" in dtype2:
+                    inp_2 = self.block_builder.emit(relax.op.astype(inp_2, "float32"))
+                
+                # Use floor(divide(...)) for floats
+                div = self.block_builder.emit(relax.op.divide(inp_1, inp_2))
+                return self.block_builder.emit(relax.op.floor(div))
+            else:
+                # Integer division
+                # Ensure same int type
+                if dtype1 != dtype2 and dtype1 and dtype2:
+                     inp_2 = self.block_builder.emit(relax.op.astype(inp_2, dtype1))
+                return self.block_builder.emit(relax.op.floor_divide(inp_1, inp_2))
         else:
             if rounding_mode is None:
                 # True division (normal float division)
@@ -196,4 +210,173 @@ def patch_floor_divide():
 
     BaseFXGraphImporter._div = patched_div
 
+    # Also patch floor_divide op directly if it exists in convert_map?
+    # BaseFXGraphImporter handles aten.div. 
+    # aten.floor_divide might be handled separately or mapped to div with mode='floor'.
+    # Let's assume it goes through _div or we can add it.
+    
+    # We can also add explicit converter for floor_divide just in case
+    def _floor_divide(self, node):
+        # Call patched_div with rounding_mode='floor'
+        # We need to mock node.kwargs or args
+        # floor_divide(input, other)
+        # We can just reuse the logic
+        args = self.retrieve_args(node)
+        inp_1 = args[0]
+        inp_2 = args[1]
+        if isinstance(inp_2, (int, float)): inp_2 = relax.const(inp_2)
+        if isinstance(inp_1, (int, float)): inp_1 = relax.const(inp_1)
+        
+        dtype1 = inp_1.struct_info.dtype if hasattr(inp_1, "struct_info") else None
+        dtype2 = inp_2.struct_info.dtype if hasattr(inp_2, "struct_info") else None
+        
+        is_float = False
+        if (dtype1 and "float" in dtype1) or (dtype2 and "float" in dtype2):
+            is_float = True
+            
+        if is_float:
+            if dtype1 and "int" in dtype1: inp_1 = self.block_builder.emit(relax.op.astype(inp_1, "float32"))
+            if dtype2 and "int" in dtype2: inp_2 = self.block_builder.emit(relax.op.astype(inp_2, "float32"))
+            div = self.block_builder.emit(relax.op.divide(inp_1, inp_2))
+            return self.block_builder.emit(relax.op.floor(div))
+        else:
+            if dtype1 != dtype2 and dtype1 and dtype2: inp_2 = self.block_builder.emit(relax.op.astype(inp_2, dtype1))
+            return self.block_builder.emit(relax.op.floor_divide(inp_1, inp_2))
+
+    from tvm.relax.frontend.torch import exported_program_translator as ept
+    orig_create_convert_map = ept.ExportedProgramImporter.create_convert_map
+    def patched_map(self):
+        m = orig_create_convert_map(self)
+        m["floor_divide"] = _floor_divide
+        m["floor_divide.default"] = _floor_divide
+        m["aten::floor_divide"] = _floor_divide
+        return m
+    ept.ExportedProgramImporter.create_convert_map = patched_map
+
 patch_floor_divide()
+
+def patch_assertions():
+    """Add converters for assertions and equality checks."""
+    from tvm import relax
+    from tvm.relax.frontend.torch import exported_program_translator as ept
+
+    orig_create_convert_map = ept.ExportedProgramImporter.create_convert_map
+
+    def patched(self):
+        def _eq(node):
+            # args[0] and args[1] are inputs
+            # Check if args are in env (Nodes) or constants
+            lhs = self.env[node.args[0]] if node.args[0] in self.env else node.args[0]
+            rhs = self.env[node.args[1]] if node.args[1] in self.env else node.args[1]
+            
+            def to_relax(val):
+                if isinstance(val, (int, float, bool)):
+                    return relax.const(val)
+                if hasattr(val, "dtype") and not isinstance(val, relax.Expr):
+                     # Likely TIR var (PrimExpr)
+                     return relax.PrimValue(val)
+                if not isinstance(val, relax.Expr):
+                     # Try to wrap as const
+                     return relax.const(val)
+                return val
+
+            lhs = to_relax(lhs)
+            rhs = to_relax(rhs)
+            return self.block_builder.emit(relax.op.equal(lhs, rhs))
+
+        def _assert_scalar(node):
+            # We just ignore assertions for now
+            return self.block_builder.emit(relax.op.null_value())
+
+        convert_map = orig_create_convert_map(self)
+        # Add multiple keys to cover potential naming variations
+        eq_keys = ["eq", "eq.Scalar", "eq.default", "aten::eq", "aten.eq"]
+        assert_keys = ["_assert_scalar.default", "aten::_assert_scalar.default", "aten._assert_scalar.default"]
+        
+        for key in eq_keys:
+            if key not in convert_map:
+                convert_map[key] = _eq
+        
+        for key in assert_keys:
+            if key not in convert_map:
+                convert_map[key] = _assert_scalar
+                
+        return convert_map
+
+    ept.ExportedProgramImporter.create_convert_map = patched
+    print("DEBUG: patch_assertions applied")
+
+patch_assertions()
+
+def patch_slice():
+    """Patch slice to handle list arguments from dynamic shapes."""
+    from tvm import relax
+    from tvm.relax.frontend.torch import exported_program_translator as ept
+
+    orig_create_convert_map = ept.ExportedProgramImporter.create_convert_map
+
+    def patched(self):
+        def _slice(node):
+            args = node.args
+            data = self.env[args[0]]
+            dim = args[1] if len(args) > 1 else 0
+            start = args[2] if len(args) > 2 else 0
+            if start is None: start = 0
+            end = args[3] if len(args) > 3 else 9223372036854775807 # INT64_MAX
+            if end is None: end = 9223372036854775807
+            step = args[4] if len(args) > 4 else 1
+            if step is None: step = 1
+            
+            def clean_arg(arg):
+                import sys
+                if arg in self.env:
+                    return self.env[arg]
+                if isinstance(arg, list) and len(arg) == 1:
+                    arg = arg[0]
+                try:
+                    return int(arg)
+                except:
+                    sys.stderr.write(f"DEBUG: clean_arg failed to cast {arg} type={type(arg)}\n")
+                    if hasattr(arg, "name"):
+                        sys.stderr.write(f"DEBUG: arg is Node? name={arg.name}\n")
+                    sys.stderr.flush()
+                    return arg
+
+            dim_val = clean_arg(dim)
+            start_val = clean_arg(start)
+            end_val = clean_arg(end)
+            step_val = clean_arg(step)
+            
+            is_dynamic = False
+            if isinstance(start_val, relax.Expr) and not isinstance(start_val, relax.Constant): is_dynamic = True
+            if isinstance(end_val, relax.Expr) and not isinstance(end_val, relax.Constant): is_dynamic = True
+            if isinstance(step_val, relax.Expr) and not isinstance(step_val, relax.Constant): is_dynamic = True
+            
+            if is_dynamic:
+                 def ensure_tensor(val):
+                     if isinstance(val, (int, float)):
+                         return relax.const([val], dtype="int64")
+                     if isinstance(val, relax.Expr):
+                         if val.struct_info.ndim == 0:
+                             return self.block_builder.emit(relax.op.reshape(val, [1]))
+                         return val
+                     return relax.const([val], dtype="int64")
+
+                 t_start = ensure_tensor(start_val)
+                 t_end = ensure_tensor(end_val)
+                 t_step = ensure_tensor(step_val)
+                 
+                 return self.block_builder.emit(relax.op.dynamic_strided_slice(data, t_start, t_end, t_step, axes=[dim_val]))
+            else:
+                 return self.block_builder.emit(relax.op.strided_slice(data, axes=[dim_val], begin=[start_val], end=[end_val], strides=[step_val]))
+
+        convert_map = orig_create_convert_map(self)
+        # Override slice converters
+        convert_map["slice.Tensor"] = _slice
+        convert_map["slice.default"] = _slice
+        return convert_map
+
+    ept.ExportedProgramImporter.create_convert_map = patched
+    print("DEBUG: patch_slice applied")
+
+patch_slice()

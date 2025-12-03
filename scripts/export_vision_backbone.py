@@ -14,6 +14,10 @@ import os
 import patch_rope
 patch_rope.apply_patches()
 
+# Apply ViTDet patches (fix SDPA decomposition issue)
+import patch_vitdet
+patch_vitdet.apply_patches()
+
 # Apply TVM custom ops (scatter, roi_align, floor_divide)
 import tvm_custom_ops # noqa: F401
 
@@ -114,6 +118,35 @@ def import_to_tvm(exported_program):
         with open("sam3_vision_backbone_tvm.txt", "w") as f:
             f.write(str(mod))
         print("  Saved TVM IR to sam3_vision_backbone_tvm.txt")
+        
+        print("\n=== Compiling with TVM Relax ===")
+        # Apply LegalizeOps to decompose LayerNorm to avoid LLVM debug info issue
+        from tvm import relax
+        
+        def legalize_layer_norm(bb, call):
+            data = call.args[0]
+            gamma = call.args[1]
+            beta = call.args[2]
+            axis = call.attrs.axes
+            epsilon = call.attrs.epsilon
+            
+            # Cast epsilon to float32
+            eps = relax.const(epsilon, "float32")
+            
+            mean = bb.emit(relax.op.mean(data, axis, keepdims=True))
+            sub = bb.emit(relax.op.subtract(data, mean))
+            sq = bb.emit(relax.op.multiply(sub, sub))
+            var = bb.emit(relax.op.mean(sq, axis, keepdims=True))
+            std = bb.emit(relax.op.sqrt(relax.op.add(var, eps)))
+            out = bb.emit(relax.op.divide(sub, std))
+            out = bb.emit(relax.op.multiply(out, gamma))
+            out = bb.emit(relax.op.add(out, beta))
+            return out
+
+        mod = relax.transform.LegalizeOps({"relax.nn.layer_norm": legalize_layer_norm})(mod)
+        
+        ex = relax.build(mod, target="llvm")
+        print("✓ Successfully compiled!")
         
         return mod
         
