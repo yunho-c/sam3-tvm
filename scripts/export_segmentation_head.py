@@ -8,13 +8,7 @@ from tvm import relax
 from tvm.relax.frontend.torch import from_exported_program
 import mock_setup
 import tvm_custom_ops
-from manual_attention import ManualMultiheadAttention
 
-# Patch globally
-torch.nn.MultiheadAttention = ManualMultiheadAttention
-
-# Replace MultiheadAttention
-MultiheadAttention = ManualMultiheadAttention
 
 # Import SAM3 components
 from sam3.model.maskformer_segmentation import UniversalSegmentationHead, PixelDecoder

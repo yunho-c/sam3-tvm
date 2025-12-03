@@ -179,7 +179,10 @@ This document tracks the progress of porting SAM3 to TVM.
  ## Phase 3: Optimization & Verification
  
  ### Correctness Verification
- - [ ] Component-level output comparison (PyTorch vs TVM)
+ 
+ #### Verification Framework
+ - [x] Create verification script: `scripts/verify_components.py`
+ - [ ] Run component-level verification
    - [ ] Vision backbone
    - [ ] Geometry encoder
    - [ ] Transformer encoder
@@ -187,30 +190,61 @@ This document tracks the progress of porting SAM3 to TVM.
    - [ ] Segmentation head
    - [ ] Scoring head
  - [ ] End-to-end output comparison
- - [ ] Numerical tolerance testing
- - [ ] Document comparison methodology
+ - [ ] Document results in `VERIFICATION_REPORT.md`
+ 
+ **Methodology:**
+ - Numerical tolerance: `rtol=1e-5, atol=1e-5`
+ - Metrics tracked: max absolute error, mean absolute error, max relative error
+ - Output: `verification_report.json` with detailed comparison results
+ 
+ **Usage:**
+ ```bash
+ py -3.13 scripts/verify_components.py
+ ```
  
  ### Performance Optimization
- - [ ] Apply TVM tuning (MetaSchedule)
-   - [ ] Vision backbone
-   - [ ] Full model
- - [ ] Memory optimization
-   - [ ] Analyze peak memory usage
-   - [ ] Optimize memory layout
- - [ ] Batch size optimization
- - [ ] Compare with PyTorch performance
-   - [ ] Latency
-   - [ ] Throughput
-   - [ ] Memory usage
+ 
+ #### Benchmarking
+ - [ ] Create benchmarking script: `scripts/benchmark_components.py`
+ - [ ] Establish baseline performance (PyTorch vs TVM unoptimized)
+   - [ ] Latency (mean, median, p95, p99)
+   - [ ] Throughput (inferences/sec)
+   - [ ] Peak memory usage
+ - [ ] Document baseline metrics
+ 
+ #### TVM MetaSchedule Tuning
+ - [ ] Create tuning script: `scripts/tune_with_metaschedule.py`
+ - [ ] Apply auto-tuning to vision backbone
+ - [ ] Apply auto-tuning to full model (optional)
+ - [ ] Save tuned parameters for reuse
+ - [ ] Compare performance before/after tuning
+ 
+ **Performance Goals:**
+ - TVM (unoptimized) within 2x of PyTorch
+ - TVM (tuned) matches or exceeds PyTorch performance
  
  ### Deployment
- - [ ] Target-specific compilation
-   - [ ] CPU (x86_64)
-   - [ ] GPU (CUDA)
-   - [ ] Metal (Apple Silicon)
- - [ ] Runtime optimization
- - [ ] Benchmarking on target hardware
- - [ ] Document deployment guide
+ 
+ #### Multi-Target Compilation
+ - [ ] Create compilation script: `scripts/compile_for_targets.py`
+ - [ ] Compile for CPU (LLVM x86_64)
+ - [ ] Compile for CUDA (if available)
+ - [ ] Compile for Metal (Apple Silicon, if available)
+ - [ ] Validate compilation success for each target
+ - [ ] Save compiled artifacts
+ 
+ #### Documentation
+ - [ ] Create deployment guide: `DEPLOYMENT.md`
+   - [ ] Compilation instructions for each target
+   - [ ] Loading and running compiled models
+   - [ ] Performance characteristics
+   - [ ] Known limitations and workarounds
+ - [ ] Create verification report: `VERIFICATION_REPORT.md`
+   - [ ] Numerical accuracy results
+   - [ ] Known discrepancies and causes
+   - [ ] Tolerance thresholds
+   - [ ] Production recommendations
+
 
 ---
 

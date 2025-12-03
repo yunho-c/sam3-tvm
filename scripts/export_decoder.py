@@ -8,10 +8,6 @@ import torch.nn.functional as F
 import math
 import mock_setup  # noqa: F401
 import tvm_custom_ops  # noqa: F401
-from manual_attention import ManualMultiheadAttention
-
-# Patch globally
-torch.nn.MultiheadAttention = ManualMultiheadAttention
 
 from sam3.model_builder import build_sam3_image_model
 from sam3.model.decoder import TransformerDecoder

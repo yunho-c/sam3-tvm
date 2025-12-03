@@ -40,13 +40,7 @@ import tvm_custom_ops # noqa: F401
 from sam3.model.encoder import TransformerEncoderLayer
 import math
 import torch.nn.functional as F
-from manual_attention import ManualMultiheadAttention
 
-# Patch globally
-torch.nn.MultiheadAttention = ManualMultiheadAttention
-
-# Replace MultiheadAttention with ManualMultiheadAttention
-MultiheadAttention = ManualMultiheadAttention
 
 from sam3.model import geometry_encoders
 

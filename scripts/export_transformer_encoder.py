@@ -32,7 +32,6 @@ sys.modules["triton.runtime.driver"] = triton.runtime.driver
 sys.modules["decord"] = MagicMock()
 
 import mock_setup
-from manual_attention import ManualMultiheadAttention
 
 # Import SAM3 components
 from sam3.model.encoder import TransformerEncoderFusion, TransformerEncoderLayer
@@ -40,11 +39,6 @@ from sam3.model.model_misc import MultiheadAttentionWrapper as MultiheadAttentio
 import math
 import torch.nn.functional as F
 
-# Patch globally
-torch.nn.MultiheadAttention = ManualMultiheadAttention
-
-# Replace MultiheadAttention
-MultiheadAttention = ManualMultiheadAttention
 
 def build_transformer_encoder():
     """
