@@ -172,33 +172,32 @@ This document tracks the progress of porting SAM3 to TVM.
 
 ### TVM Import Tasks
 
-#### [ ] Import Vision Backbone to TVM Relax
-- **Blocker**: RoPE complex64 issue
-- **Target**: Successful Relax IR generation
-- **Verification**: Compare outputs with PyTorch
+#### [x] Import Vision Backbone to TVM Relax
+- **Status**: ✅ Imported (RoPE patched)
+- **Verification**: [ ] Compare outputs with PyTorch
 
-#### [ ] Import Geometry Encoder to TVM Relax
-- **Dependencies**: roi_align and grid_sample support
-- **Verification**: Compare outputs with PyTorch
+#### [x] Import Geometry Encoder to TVM Relax
+- **Status**: ✅ Imported (scatter/roi_align patched)
+- **Verification**: [ ] Compare outputs with PyTorch
 
-#### [ ] Import Transformer Encoder to TVM Relax
-- **Dependencies**: Cross-attention support
-- **Verification**: Compare outputs with PyTorch
+#### [x] Import Transformer Encoder to TVM Relax
+- **Status**: ✅ Imported
+- **Verification**: [ ] Compare outputs with PyTorch
 
-#### [ ] Import Transformer Decoder to TVM Relax
-- **Dependencies**: RoPE solution from vision backbone
-- **Verification**: Compare outputs with PyTorch
+#### [x] Import Transformer Decoder to TVM Relax
+- **Status**: ✅ Imported
+- **Verification**: [ ] Compare outputs with PyTorch
 
-#### [ ] Import Output Heads to TVM Relax
-- **Expected**: Should be straightforward
-- **Verification**: Compare outputs with PyTorch
+#### [x] Import Output Heads to TVM Relax
+- **Status**: ✅ Imported
+- **Verification**: [ ] Compare outputs with PyTorch
 
 #### [ ] End-to-End TVM Module
 - **Tasks**:
-  - Combine all components
-  - Handle multi-input/multi-output
-  - Verify correctness vs PyTorch
-  - Document any limitations
+  - [ ] Combine all components
+  - [ ] Handle multi-input/multi-output
+  - [ ] Verify correctness vs PyTorch
+  - [ ] Document any limitations
 
 ---
 
