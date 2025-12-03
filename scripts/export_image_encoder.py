@@ -35,6 +35,13 @@ from sam3.model.vitdet import ViT
 from sam3.model.necks import Sam3DualViTDetNeck
 from sam3.model.position_encoding import PositionEmbeddingSine
 
+# Apply RoPE patches
+import patch_rope
+patch_rope.apply_patches()
+
+# Apply TVM custom ops (scatter, roi_align, floor_divide)
+import tvm_custom_ops # noqa: F401
+
 def build_image_encoder():
     """
     Reconstructs the Image Encoder (ViT + Neck) as defined in sam3/model_builder.py

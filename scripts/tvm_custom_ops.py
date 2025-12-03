@@ -148,3 +148,51 @@ def patch_torchvision_roi_align():
     ept.ExportedProgramImporter.create_convert_map = patched
 
 patch_torchvision_roi_align()
+
+def patch_floor_divide():
+    """Monkeypatch BaseFXGraphImporter._div to handle type mismatch in floor_divide."""
+    from tvm.relax.frontend.torch.base_fx_graph_translator import BaseFXGraphImporter
+    from tvm import relax
+    
+    original_div = BaseFXGraphImporter._div
+    
+    def patched_div(self, node):
+        args = self.retrieve_args(node)
+        inp_1 = args[0]
+        inp_2 = args[1]
+
+        # Handle scalar cases
+        if isinstance(inp_2, (int, float)):
+            inp_2 = relax.const(inp_2)
+
+        # Get rounding_mode from node kwargs
+        rounding_mode = args[2] if len(node.args) > 2 else node.kwargs.get("rounding_mode", None)
+
+        # Perform division based on rounding mode
+        if rounding_mode == "floor":
+            # Check types and cast if mismatch
+            dtype1 = inp_1.struct_info.dtype if hasattr(inp_1, "struct_info") else None
+            dtype2 = inp_2.struct_info.dtype if hasattr(inp_2, "struct_info") else None
+            
+            if dtype1 and dtype2 and dtype1 != dtype2:
+                # If one is float and other is int, cast int to float
+                if "float" in dtype1 and "int" in dtype2:
+                     inp_2 = self.block_builder.emit(relax.op.astype(inp_2, dtype1))
+                elif "int" in dtype1 and "float" in dtype2:
+                     inp_1 = self.block_builder.emit(relax.op.astype(inp_1, dtype2))
+            
+            return self.block_builder.emit(relax.op.floor_divide(inp_1, inp_2))
+        else:
+            if rounding_mode is None:
+                # True division (normal float division)
+                return self.block_builder.emit(relax.op.divide(inp_1, inp_2))
+            elif rounding_mode == "trunc":
+                # Trunc division: perform true division then truncate
+                true_div = self.block_builder.emit(relax.op.divide(inp_1, inp_2))
+                return self.block_builder.emit(relax.op.trunc(true_div))
+            else:
+                raise ValueError(f"Unsupported rounding_mode: {rounding_mode}")
+
+    BaseFXGraphImporter._div = patched_div
+
+patch_floor_divide()

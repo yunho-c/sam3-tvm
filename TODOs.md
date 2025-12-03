@@ -95,20 +95,10 @@ This document tracks the progress of porting SAM3 to TVM.
 - **File**: `sam3/model/vitdet.py::ViT` + `sam3/model/necks.py::Sam3DualViTDetNeck`
 - **Script**: `scripts/export_image_encoder.py`
 - **Export**: ✅ SUCCESS - saved to `sam3_image_encoder_exported.pt2`
-- **TVM Import**: ❌ BLOCKED
-- **Blocker**: `NotImplementedError: input_type torch.complex64 is not handled yet` (due to RoPE).
-- **Notes**:
-    - Requires `complex64` support in TVM Relax frontend.
-    - `Sam3DualViTDetNeck` expects a Tensor input (despite type hint saying List).
-- **Patches Applied**:
-  - `scripts/export_decoder.py`: Used `strict=True` in `torch.export.export` to correctly handle guards without monkeypatching `is_dynamo_compiling`.
-  - `scripts/export_decoder.py`: Monkeypatched `BaseFXGraphImporter._div` to handle `floor_divide` type mismatch (float vs int).
-  - `scripts/tvm_custom_ops.py`: Implemented custom converter for `aten::scatter.src` mapping to `relax.op.scatter_elements`.
-  - `scripts/tvm_custom_ops.py`: Implemented custom converter for `torchvision::roi_align` mapping to `topi.image.crop_and_resize`.
-- **Notes**: Did NOT hit RoPE complex64 issue (likely uses different position embedding or compiled away).
+- **TVM Import**: ✅ SUCCESS - saved to `sam3_image_encoder_tvm.txt`
 - **Ops verified**: 
   - `floor_divide` (patched)
-  - `sin`/`cos` (for position embedding)
+  - `sin`/`cos` (RoPE patched to avoid complex64)
   - `matmul`, `layer_norm`, `relu`
 
 ### Priority 2: Output Heads
