@@ -32,8 +32,12 @@ sys.modules["triton.runtime.driver"] = triton.runtime.driver
 sys.modules["decord"] = MagicMock()
 
 # Import SAM3 components
-# Import SAM3 components
+import mock_setup
 from sam3.model.geometry_encoders import SequenceGeometryEncoder, Prompt
+import os
+
+# Apply TVM custom ops (scatter, roi_align)
+import tvm_custom_ops # noqa: F401
 from sam3.model.model_misc import MultiheadAttentionWrapper as MultiheadAttention
 from sam3.model.encoder import TransformerEncoderLayer
 

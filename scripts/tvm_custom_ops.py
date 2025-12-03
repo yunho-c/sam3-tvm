@@ -46,7 +46,8 @@ def patch_aten_scatter_src():
             # If it came in as a node, we might need to extract it.
             pass
             
-        return relax.op.scatter_elements(data, index, src, axis=dim)
+        # IMPORTANT: We must use block_builder.emit() to register the op and get a Var with struct_info
+        return self.block_builder.emit(relax.op.scatter_elements(data, index, src, axis=dim))
 
     # Inject the converter method
     ept.ExportedProgramImporter._scatter = _scatter
