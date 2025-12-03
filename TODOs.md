@@ -2,9 +2,51 @@
 
 This document tracks the progress of porting SAM3 to TVM.
 
-## Current Status
+
+ ## SAM3 Architecture Overview
  
- ### ✅ Phase 1: Component Export & Import
+ ```
+ ┌─────────────────────────────────────────────────────────┐
+ │ Input: Image (1008×1008) + Prompts (text/box/point)     │
+ └─────────────────────────────────────────────────────────┘
+                           ↓
+ ┌─────────────────────────────────────────────────────────┐
+ │ 1. BACKBONE                                             │
+ │    ├─ Vision Encoder (ViT + RoPE)                       │
+ │    ├─ Text Encoder (CLIP-like)                          │
+ │    └─ VL Combiner (fusion)                              │
+ └─────────────────────────────────────────────────────────┘
+                           ↓
+ ┌─────────────────────────────────────────────────────────┐
+ │ 2. GEOMETRY ENCODER                                     │
+ │    ├─ Point encoding                                    │
+ │    ├─ Box encoding (roi_align)                          │
+ │    └─ Mask encoding (grid_sample)                       │
+ └─────────────────────────────────────────────────────────┘
+                           ↓
+ ┌─────────────────────────────────────────────────────────┐
+ │ 3. TRANSFORMER ENCODER                                  │
+ │    ├─ Cross-attention (vision + prompts)                │
+ │    └─ Multi-scale fusion                                │
+ └─────────────────────────────────────────────────────────┘
+                           ↓
+ ┌─────────────────────────────────────────────────────────┐
+ │ 4. TRANSFORMER DECODER                                  │
+ │    ├─ Object queries                                    │
+ │    ├─ Self-attention                                    │
+ │    ├─ Cross-attention                                   │
+ │    ├─ RoPE attention (complex64 issue!)                 │
+ │    └─ Box refinement                                    │
+ └─────────────────────────────────────────────────────────┘
+                           ↓
+ ┌─────────────────────────────────────────────────────────┐
+ │ 5. OUTPUT HEADS                                         │
+ │    ├─ Segmentation Head (pixel-wise masks)              │
+ │    └─ Scoring Head (confidence scores)                  │
+ └─────────────────────────────────────────────────────────┘
+ ```
+
+ ## ✅ Phase 1: Component Export & Import
  
  #### [x] Export Vision Backbone (**Exported & Imported**)
  - **File**: `sam3/model/image_encoder.py` (via `build_sam3_image_model`)
@@ -75,51 +117,6 @@ This document tracks the progress of porting SAM3 to TVM.
    - Dot product
    - Linear layers
  - **Notes**: Mocked `triton` and `decord`.
- 
- ---
- 
- ## SAM3 Architecture Overview
- 
- ```
- ┌─────────────────────────────────────────────────────────┐
- │ Input: Image (1008×1008) + Prompts (text/box/point)   │
- └─────────────────────────────────────────────────────────┘
-                           ↓
- ┌─────────────────────────────────────────────────────────┐
- │ 1. BACKBONE                                      [DONE] │
- │    ├─ Vision Encoder (ViT + RoPE)                      │
- │    ├─ Text Encoder (CLIP-like)                         │
- │    └─ VL Combiner (fusion)                             │
- └─────────────────────────────────────────────────────────┘
-                           ↓
- ┌─────────────────────────────────────────────────────────┐
- │ 2. GEOMETRY ENCODER                              [TODO] │
- │    ├─ Point encoding                                    │
- │    ├─ Box encoding (roi_align)                         │
- │    └─ Mask encoding (grid_sample)                      │
- └─────────────────────────────────────────────────────────┘
-                           ↓
- ┌─────────────────────────────────────────────────────────┐
- │ 3. TRANSFORMER ENCODER                           [TODO] │
- │    ├─ Cross-attention (vision + prompts)               │
- │    └─ Multi-scale fusion                               │
- └─────────────────────────────────────────────────────────┘
-                           ↓
- ┌─────────────────────────────────────────────────────────┐
- │ 4. TRANSFORMER DECODER                           [TODO] │
- │    ├─ Object queries                                    │
- │    ├─ Self-attention                                    │
- │    ├─ Cross-attention                                   │
- │    ├─ RoPE attention (complex64 issue!)                │
- │    └─ Box refinement                                    │
- └─────────────────────────────────────────────────────────┘
-                           ↓
- ┌─────────────────────────────────────────────────────────┐
- │ 5. OUTPUT HEADS                                  [TODO] │
- │    ├─ Segmentation Head (pixel-wise masks)             │
- │    └─ Scoring Head (confidence scores)                 │
- └─────────────────────────────────────────────────────────┘
- ```
  
  ---
  
@@ -214,26 +211,6 @@ This document tracks the progress of porting SAM3 to TVM.
  - [ ] Runtime optimization
  - [ ] Benchmarking on target hardware
  - [ ] Document deployment guide
-
----
-
-## Immediate Next Steps
-
-   - Simplest component to start with
-   - Will reveal grid_sample/roi_align support status
-   
-2. **Upstream/replace prod shim**
-   - Add proper `aten::prod.dim_int` converter to TVM or refactor shim away
-   - Keep shim as temporary unblocker for transformer encoder import
-   
-3. **Export Decoder + Heads** 
-   - Will hit RoPE issue again
-   - Use same wrapper pattern as vision backbone
-   
-4. **Research RoPE in TVM**
-   - Study LLM implementations
-   - Prototype solution
-   - Apply to all RoPE components
 
 ---
 
