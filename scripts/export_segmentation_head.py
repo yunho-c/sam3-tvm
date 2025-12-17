@@ -12,6 +12,7 @@ import tvm_custom_ops
 
 # Import SAM3 components
 from sam3.model.maskformer_segmentation import UniversalSegmentationHead, PixelDecoder
+from sam3.model.model_misc import MultiheadAttentionWrapper as MultiheadAttention
 
 # ... (rest of file)
 

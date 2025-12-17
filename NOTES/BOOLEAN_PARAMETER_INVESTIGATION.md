@@ -378,3 +378,41 @@ grep -B 5 "dtype mismatch\|typebool" integration_test_passcontext.log
 ```bash
 python3.13 scripts/export_decoder.py
 ```
+
+# Integration Test Results Summary
+
+## Test Status: ✅ Exports Working, ⚠️ Compilation Issues Identified
+
+### Component Results:
+
+| Component | Export | Import | Compile | Boolean Params | Error |
+|-----------|--------|--------|---------|----------------|-------|
+| Vision Backbone | ✓ | ✓ | ✓ | No | - |
+| Geometry Encoder | ✗ | ✗ | ✗ | Unknown | Export failed |
+| Transformer Encoder | ✗ | ✗ | ✗ | Unknown | Export failed |
+| Transformer Decoder | ✓ | ✓ | ✗ | Yes (`point_mask`, `prompt_key_padding_mask`, `text_attention_mask`) | dtype mismatch (float32 vs bool) |
+| Segmentation Head | ✓ | ✓ | ✗ | Yes (`prompt_mask`) | Unknown |
+| Scoring Head | ✓ | ✓ | ✗ | Yes (`prompt_mask`) | LLVM verification failed |
+
+### Boolean Parameters Detected:
+
+1. **Transformer Decoder**: `point_mask`, `prompt_key_padding_mask`, `text_attention_mask`
+2. **Segmentation Head**: `prompt_mask`
+3. **Scoring Head**: `prompt_mask`
+
+### Key Findings:
+
+1. **Export Issues**: Geometry Encoder and Transformer Encoder still have export failures (likely unrelated to boolean parameters)
+
+2. **Boolean Parameter Detection Working**: The patch successfully detects boolean parameters in 3 components
+
+3. **Compilation Errors**:
+   - **Transformer Decoder**: Clear dtype mismatch error (float32 vs bool) - this is the expected error
+   - **Scoring Head**: LLVM verification failure (different error, may be unrelated)
+   - **Segmentation Head**: Unknown error (need to check logs)
+
+### Next Steps Options:
+
+**Option A**: Fix the export failures first (Geometry Encoder, Transformer Encoder)
+**Option B**: Implement boolean parameter casting at PyTorch export level
+**Option C**: Document current state and move forward with working components

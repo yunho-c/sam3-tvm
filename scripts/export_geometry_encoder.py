@@ -38,6 +38,7 @@ import os
 
 import tvm_custom_ops # noqa: F401
 from sam3.model.encoder import TransformerEncoderLayer
+from sam3.model.model_misc import MultiheadAttentionWrapper as MultiheadAttention
 import math
 import torch.nn.functional as F
 
