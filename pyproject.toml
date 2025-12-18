@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "SAM3 TVM integration"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["numpy>=2.3.5,<3", "psutil>=7.1.3,<8"]
 
 [build-system]
 requires = ["hatchling"]
@@ -20,6 +20,9 @@ platforms = ["osx-arm64", "linux-64"]
 [tool.pixi.pypi-dependencies]
 sam3-tvm = { path = ".", editable = true }
 pytest = "*"
+tvm = { path = "external/tvm/python", editable = true }
+apache-tvm-ffi = { path = "external/tvm/3rdparty/tvm-ffi", editable = true }
 
 [tool.pixi.tasks]
 test = "pytest"
+build-tvm = "bash scripts/build_tvm.sh"
